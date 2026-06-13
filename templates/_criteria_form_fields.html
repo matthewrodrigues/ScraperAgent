@@ -1,0 +1,43 @@
+{# Structured criteria fields. Rendered standalone by POST /searches/parse,
+   and inlined into the form on GET /. The form submit (POST /searches)
+   reads these field names directly. #}
+<div id="structured-fields" class="structured-fields">
+    {% if parse_error %}
+    <p class="error">Couldn't parse — please fill in manually. ({{ parse_error }})</p>
+    {% endif %}
+
+    <label>
+        Title keywords
+        <input type="text" name="title_keywords" value="{{ criteria.title_keywords if criteria else '' }}">
+    </label>
+
+    <label>
+        Exclude (comma-separated)
+        <input type="text" name="must_not_keywords_csv"
+               value="{{ (criteria.must_not_keywords | join(', ')) if criteria and criteria.must_not_keywords else '' }}"
+               placeholder="broken, parts only, water damage">
+    </label>
+
+    <label>
+        Condition floor
+        <select name="condition_floor">
+            <option value="">— any —</option>
+            {% set sel = (criteria.condition_floor if criteria else None) %}
+            <option value="used"        {% if sel == 'used' %}selected{% endif %}>Used or better</option>
+            <option value="refurbished" {% if sel == 'refurbished' %}selected{% endif %}>Refurbished or better</option>
+            <option value="new"         {% if sel == 'new' %}selected{% endif %}>New only</option>
+        </select>
+    </label>
+
+    <label>
+        Max price (USD) <span class="req">*</span>
+        <input type="number" name="max_price" step="0.01" min="0" required
+               value="{{ criteria.max_price if criteria and criteria.max_price is not none else '' }}">
+    </label>
+
+    <label>
+        Min seller rating (%)
+        <input type="number" name="min_seller_rating" step="0.1" min="0" max="100"
+               value="{{ criteria.min_seller_rating if criteria and criteria.min_seller_rating is not none else '' }}">
+    </label>
+</div>

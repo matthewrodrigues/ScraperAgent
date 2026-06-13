@@ -1,0 +1,37 @@
+{% extends "base.html" %}
+{% block title %}Search #{{ search.id }} — ScraperAgent{% endblock %}
+{% block content %}
+<section class="search-detail">
+    <h1>Search #{{ search.id }}</h1>
+    <p class="muted">Submitted {{ search.created_at }} · status: <strong>{{ search.status }}</strong></p>
+
+    <h2>What you asked for</h2>
+    <blockquote>{{ search.criteria_nl }}</blockquote>
+
+    <h2>Parsed criteria</h2>
+    <dl class="criteria">
+        <dt>Title keywords</dt>
+        <dd>{{ search.criteria_structured.title_keywords or "—" }}</dd>
+
+        <dt>Exclude</dt>
+        <dd>
+            {% set excl = search.criteria_structured.must_not_keywords %}
+            {{ excl | join(", ") if excl else "—" }}
+        </dd>
+
+        <dt>Condition floor</dt>
+        <dd>{{ search.criteria_structured.condition_floor or "any" }}</dd>
+
+        <dt>Max price</dt>
+        <dd>${{ "%.2f"|format(search.max_price) }}</dd>
+
+        <dt>Min seller rating</dt>
+        <dd>
+            {% set msr = search.criteria_structured.min_seller_rating %}
+            {{ "%.1f%%"|format(msr) if msr is not none else "—" }}
+        </dd>
+    </dl>
+
+    <p class="placeholder">Reference-price discovery & eBay search land in build steps 3–4.</p>
+</section>
+{% endblock %}
