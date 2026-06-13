@@ -1,0 +1,44 @@
+{
+  "_comment": "Toggle skills on/off by setting true/false. This file is a manifest only — Claude reads it to know which skills you want active.",
+  "core": {
+    "init": true,
+    "review": true,
+    "security-review": true
+  },
+  "settings_and_harness": {
+    "update-config": true,
+    "keybindings-help": true,
+    "fewer-permission-prompts": true,
+    "simplify": true,
+    "loop": true,
+    "schedule": true
+  },
+  "superpowers": {
+    "using-superpowers": true,
+    "brainstorming": true,
+    "writing-plans": true,
+    "executing-plans": true,
+    "subagent-driven-development": true,
+    "dispatching-parallel-agents": true,
+    "test-driven-development": true,
+    "systematic-debugging": true,
+    "verification-before-completion": true,
+    "receiving-code-review": true,
+    "requesting-code-review": true,
+    "using-git-worktrees": true,
+    "finishing-a-development-branch": true,
+    "writing-skills": true
+  },
+  "plugins": {
+    "claude-api": true,
+    "frontend-design": true,
+    "mgrep": true,
+    "ralph-wiggum": true,
+    "commit-commands": true,
+    "pr-review-toolkit": true,
+    "code-review": true,
+    "feature-dev": true,
+    "hookify": true,
+    "agent-auth": true
+  }
+}

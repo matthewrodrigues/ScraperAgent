@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>{% block title %}ScraperAgent{% endblock %}</title>
+    {# HTMX is self-hosted at /static/htmx.min.js (downloaded by scripts/setup.py); CDN avoided so we don't depend on unpkg SRI hashes. #}
+    {% block head_extra %}{% endblock %}
+    <link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+    <header>
+        <a href="/" class="brand">ScraperAgent</a>
+        <nav>
+            <a href="/">Home</a>
+        </nav>
+    </header>
+    <main>
+        {% block content %}{% endblock %}
+    </main>
+</body>
+</html>

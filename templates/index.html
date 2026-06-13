@@ -1,0 +1,31 @@
+{% extends "base.html" %}
+{% block title %}ScraperAgent — Home{% endblock %}
+{% block content %}
+<section class="hero">
+    <h1>ScraperAgent</h1>
+    <p>Tell me what you want. I'll find it, price-check it, and negotiate on eBay.</p>
+    <p class="placeholder">Criteria form lands in the next build step. For now: foundation only.</p>
+</section>
+
+<section>
+    <h2>Recent searches</h2>
+    {% if recent_searches %}
+        <table>
+            <thead><tr><th>#</th><th>Query</th><th>Max</th><th>Status</th><th>Started</th></tr></thead>
+            <tbody>
+                {% for s in recent_searches %}
+                <tr>
+                    <td>{{ s.id }}</td>
+                    <td>{{ s.criteria_nl }}</td>
+                    <td>${{ "%.2f"|format(s.max_price) }}</td>
+                    <td>{{ s.status }}</td>
+                    <td>{{ s.created_at }}</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    {% else %}
+        <p>No searches yet.</p>
+    {% endif %}
+</section>
+{% endblock %}

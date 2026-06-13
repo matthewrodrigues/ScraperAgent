@@ -1,0 +1,64 @@
+/* Minimal, intentionally plain. Polish lands later. */
+:root {
+    --bg: #f7f7f8;
+    --fg: #1c1c1f;
+    --muted: #6e6e76;
+    --accent: #2563eb;
+    --border: #e3e3e8;
+}
+* { box-sizing: border-box; }
+body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    background: var(--bg);
+    color: var(--fg);
+    line-height: 1.5;
+}
+header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0.75rem 1.5rem;
+    background: white;
+    border-bottom: 1px solid var(--border);
+}
+.brand {
+    font-weight: 700;
+    text-decoration: none;
+    color: var(--fg);
+}
+nav a {
+    margin-left: 1rem;
+    text-decoration: none;
+    color: var(--muted);
+}
+nav a:hover { color: var(--accent); }
+main {
+    max-width: 980px;
+    margin: 2rem auto;
+    padding: 0 1.5rem;
+}
+.hero h1 { margin-bottom: 0.25rem; }
+.hero p { color: var(--muted); }
+.placeholder {
+    margin-top: 1rem;
+    padding: 0.75rem 1rem;
+    background: #fff7d6;
+    border-left: 3px solid #d6a800;
+    border-radius: 4px;
+    color: #7a5e00;
+}
+table {
+    width: 100%;
+    border-collapse: collapse;
+    margin-top: 0.5rem;
+    background: white;
+    border: 1px solid var(--border);
+}
+th, td {
+    text-align: left;
+    padding: 0.5rem 0.75rem;
+    border-bottom: 1px solid var(--border);
+}
+th { background: #fafafa; font-weight: 600; }
+tbody tr:last-child td { border-bottom: none; }

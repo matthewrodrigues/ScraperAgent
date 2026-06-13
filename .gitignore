@@ -1,0 +1,15 @@
+.venv/
+.env
+browser_profile/
+screenshots/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Playwright
+node_modules/
+/test-results/
+/playwright-report/
+/blob-report/
+/playwright/.cache/
+/playwright/.auth/
