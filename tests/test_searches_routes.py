@@ -41,3 +41,69 @@ def test_post_searches_parse_haiku_failure_renders_empty_with_banner(mock_parse,
     resp = client.post("/searches/parse", data={"criteria_nl": "anything"})
     assert resp.status_code == 200
     assert "Couldn't parse" in resp.text
+
+
+from db import repo
+
+
+def test_post_searches_persists_and_redirects(client):
+    resp = client.post(
+        "/searches",
+        data={
+            "criteria_nl": "red iPhone 13 mini under $300",
+            "title_keywords": "iPhone 13 mini red 128GB",
+            "must_not_keywords_csv": "cracked, broken",
+            "condition_floor": "used",
+            "max_price": "300.00",
+            "min_seller_rating": "98",
+        },
+        follow_redirects=False,
+    )
+
+    assert resp.status_code == 303
+    assert resp.headers["location"].startswith("/searches/")
+
+    search_id = int(resp.headers["location"].rsplit("/", 1)[1])
+    row = repo.get_search(search_id)
+    assert row is not None
+    assert row["criteria_nl"] == "red iPhone 13 mini under $300"
+    assert row["max_price"] == 300.00
+    assert row["criteria_structured"]["must_not_keywords"] == ["cracked", "broken"]
+    assert row["criteria_structured"]["title_keywords"] == "iPhone 13 mini red 128GB"
+    assert row["criteria_structured"]["condition_floor"] == "used"
+
+
+def test_post_searches_missing_max_price_returns_400(client):
+    resp = client.post(
+        "/searches",
+        data={
+            "criteria_nl": "anything",
+            "title_keywords": "thing",
+            "must_not_keywords_csv": "",
+            "condition_floor": "",
+            "max_price": "",
+            "min_seller_rating": "",
+        },
+        follow_redirects=False,
+    )
+    assert resp.status_code == 400
+
+
+def test_post_searches_empty_condition_floor_treated_as_null(client):
+    """Form sends `condition_floor=""` for "any" — we must coerce to None."""
+    resp = client.post(
+        "/searches",
+        data={
+            "criteria_nl": "thing",
+            "title_keywords": "thing",
+            "must_not_keywords_csv": "",
+            "condition_floor": "",
+            "max_price": "50",
+            "min_seller_rating": "",
+        },
+        follow_redirects=False,
+    )
+    assert resp.status_code == 303
+    search_id = int(resp.headers["location"].rsplit("/", 1)[1])
+    row = repo.get_search(search_id)
+    assert row["criteria_structured"]["condition_floor"] is None
