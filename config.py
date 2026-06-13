@@ -38,10 +38,6 @@ MAX_PARALLEL_NEGOTIATIONS = int(os.getenv("MAX_PARALLEL_NEGOTIATIONS", "5"))
 MAX_ROUNDS = int(os.getenv("MAX_ROUNDS", "3"))
 SELLER_TIMEOUT_HOURS = int(os.getenv("SELLER_TIMEOUT_HOURS", "24"))
 
-# Back-compat aliases used by legacy v0 code paths (negotiate.py); replaced in step 8.
-MAX_NEGOTIATION_ROUNDS = MAX_ROUNDS
-DEFAULT_STRATEGY = "anchor_low"
-
 # ---- Models ----
 NEGOTIATOR_MODEL = "claude-sonnet-4-6"
 PARSER_MODEL = "claude-haiku-4-5-20251001"
