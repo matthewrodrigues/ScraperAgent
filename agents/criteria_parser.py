@@ -8,7 +8,10 @@ a JSON schema server-side — we never parse free-form JSON out of a text reply.
 
 from typing import Literal
 
+from anthropic import Anthropic
 from pydantic import BaseModel, Field
+
+import config
 
 
 ConditionFloor = Literal["new", "refurbished", "used", "any"]
@@ -41,11 +44,6 @@ class ParsedCriteria(BaseModel):
         le=100,
         description="Percentage 0-100.",
     )
-
-
-from anthropic import Anthropic
-
-import config
 
 
 class CriteriaParseError(RuntimeError):
