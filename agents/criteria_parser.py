@@ -112,3 +112,34 @@ def parse_criteria(nl_text: str) -> ParsedCriteria:
             return ParsedCriteria.model_validate(block.input)
 
     raise CriteriaParseError("Haiku response did not contain a record_criteria tool_use block")
+
+
+class SearchSubmission(BaseModel):
+    """Validated form payload for `POST /searches`.
+
+    Separate from `ParsedCriteria` because:
+      - `max_price` is required here (we won't persist a search without one)
+      - the form sends `must_not_keywords` as a single CSV string; we split here
+      - `criteria_nl` is part of the persisted row but not part of the parsed shape
+    """
+
+    criteria_nl: str
+    title_keywords: str = ""
+    must_not_keywords_csv: str = ""
+    condition_floor: ConditionFloor | None = None
+    max_price: float = Field(gt=0)
+    min_seller_rating: float | None = Field(default=None, ge=0, le=100)
+
+    @property
+    def must_not_keywords(self) -> list[str]:
+        return [kw.strip() for kw in self.must_not_keywords_csv.split(",") if kw.strip()]
+
+    def to_structured_dict(self) -> dict:
+        """Shape stored in `searches.criteria_structured_json`. Excludes `criteria_nl`
+        and `max_price` because those have dedicated columns."""
+        return {
+            "title_keywords": self.title_keywords,
+            "must_not_keywords": self.must_not_keywords,
+            "condition_floor": self.condition_floor,
+            "min_seller_rating": self.min_seller_rating,
+        }

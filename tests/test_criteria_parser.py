@@ -87,3 +87,49 @@ def test_parse_criteria_no_tool_use_block_raises(anthropic_cls):
 
     with pytest.raises(CriteriaParseError):
         parse_criteria("anything")
+
+
+def test_search_submission_requires_max_price():
+    from agents.criteria_parser import SearchSubmission
+
+    with pytest.raises(ValueError):
+        SearchSubmission(criteria_nl="anything", max_price=None)
+
+
+def test_search_submission_splits_must_not_keywords():
+    from agents.criteria_parser import SearchSubmission
+
+    sub = SearchSubmission(
+        criteria_nl="red iPhone",
+        title_keywords="iPhone 13 mini red",
+        must_not_keywords_csv=" cracked , broken ,  ,water damage",
+        condition_floor="used",
+        max_price=300.0,
+        min_seller_rating=98.0,
+    )
+
+    assert sub.must_not_keywords == ["cracked", "broken", "water damage"]
+
+
+def test_search_submission_to_structured_dict():
+    from agents.criteria_parser import SearchSubmission
+
+    sub = SearchSubmission(
+        criteria_nl="x",
+        title_keywords="thing",
+        must_not_keywords_csv="",
+        condition_floor=None,
+        max_price=50.0,
+        min_seller_rating=None,
+    )
+
+    d = sub.to_structured_dict()
+    assert d == {
+        "title_keywords": "thing",
+        "must_not_keywords": [],
+        "condition_floor": None,
+        "min_seller_rating": None,
+    }
+    # max_price is stored in its own column, not the JSON blob
+    assert "max_price" not in d
+    assert "criteria_nl" not in d
