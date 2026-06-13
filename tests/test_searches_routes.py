@@ -107,3 +107,28 @@ def test_post_searches_empty_condition_floor_treated_as_null(client):
     search_id = int(resp.headers["location"].rsplit("/", 1)[1])
     row = repo.get_search(search_id)
     assert row["criteria_structured"]["condition_floor"] is None
+
+
+def test_get_search_detail_renders_persisted_row(client):
+    search_id = repo.create_search(
+        criteria_nl="red iPhone 13 mini under $300",
+        criteria_structured={
+            "title_keywords": "iPhone 13 mini red 128GB",
+            "must_not_keywords": ["cracked"],
+            "condition_floor": "used",
+            "min_seller_rating": 98.0,
+        },
+        max_price=300.0,
+    )
+
+    resp = client.get(f"/searches/{search_id}")
+    assert resp.status_code == 200
+    assert "red iPhone 13 mini under $300" in resp.text
+    assert "iPhone 13 mini red 128GB" in resp.text
+    assert "cracked" in resp.text
+    assert "$300.00" in resp.text
+
+
+def test_get_search_detail_unknown_id_returns_404(client):
+    resp = client.get("/searches/999999")
+    assert resp.status_code == 404

@@ -78,3 +78,11 @@ def submit_search(
         max_price=submission.max_price,
     )
     return RedirectResponse(url=f"/searches/{search_id}", status_code=303)
+
+
+@router.get("/searches/{search_id}", response_class=HTMLResponse)
+def search_detail(request: Request, search_id: int) -> HTMLResponse:
+    row = repo.get_search(search_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail=f"search {search_id} not found")
+    return templates.TemplateResponse(request, "search_detail.html", {"search": row})
