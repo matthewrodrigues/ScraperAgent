@@ -41,3 +41,76 @@ class ParsedCriteria(BaseModel):
         le=100,
         description="Percentage 0-100.",
     )
+
+
+from anthropic import Anthropic
+
+import config
+
+
+class CriteriaParseError(RuntimeError):
+    """Raised when Haiku's response doesn't contain a usable tool-use block."""
+
+
+_SYSTEM_PROMPT = (
+    "You extract structured shopping criteria from a buyer's natural-language "
+    "description of an item they want to find on eBay. Call the `record_criteria` "
+    "tool exactly once. Leave any field you can't confidently infer at its default "
+    "(empty string, empty list, or null). Never guess a max price — only fill it "
+    "when the buyer states one explicitly."
+)
+
+
+_RECORD_CRITERIA_TOOL = {
+    "name": "record_criteria",
+    "description": "Record the structured shopping criteria extracted from the buyer's description.",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "title_keywords": {
+                "type": "string",
+                "description": "Concise eBay search query — the words you'd type into the search bar.",
+            },
+            "must_not_keywords": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Terms to exclude (e.g. 'broken', 'parts only').",
+            },
+            "condition_floor": {
+                "type": ["string", "null"],
+                "enum": ["new", "refurbished", "used", "any", None],
+                "description": "Minimum acceptable condition, or null if unspecified.",
+            },
+            "max_price": {
+                "type": ["number", "null"],
+                "description": "USD price ceiling if the buyer stated one; otherwise null.",
+            },
+            "min_seller_rating": {
+                "type": ["number", "null"],
+                "minimum": 0,
+                "maximum": 100,
+                "description": "Minimum seller feedback percentage if specified.",
+            },
+        },
+        "required": [],
+    },
+}
+
+
+def parse_criteria(nl_text: str) -> ParsedCriteria:
+    """Ask Haiku to extract structured criteria from a free-text description."""
+    client = Anthropic(api_key=config.ANTHROPIC_API_KEY)
+    response = client.messages.create(
+        model=config.PARSER_MODEL,
+        max_tokens=1024,
+        system=_SYSTEM_PROMPT,
+        tools=[_RECORD_CRITERIA_TOOL],
+        tool_choice={"type": "tool", "name": "record_criteria"},
+        messages=[{"role": "user", "content": nl_text}],
+    )
+
+    for block in response.content:
+        if getattr(block, "type", None) == "tool_use" and getattr(block, "name", None) == "record_criteria":
+            return ParsedCriteria.model_validate(block.input)
+
+    raise CriteriaParseError("Haiku response did not contain a record_criteria tool_use block")
