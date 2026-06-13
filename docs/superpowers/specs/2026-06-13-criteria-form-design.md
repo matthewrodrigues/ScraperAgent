@@ -161,6 +161,8 @@ Three tests, kept lightweight (no live Anthropic calls in CI):
 ## 6. Cleanup actions bundled with this step
 
 - Delete `graph/` (entire directory) — old stubs predate the PRD.
+- Delete `browser/`, `browser_profile/`, `screenshots/` — Playwright-era leftovers. The PRD drops Playwright; reference-price scraping happens in Apify's cloud, eBay negotiation goes through official APIs, and every purchase is human-confirmed, so there is no path where the agent drives a local browser.
+- Delete `package.json` and `package-lock.json` — they only existed to pull in `@playwright/test`. No JavaScript code lives in this repo.
 - Remove `MAX_NEGOTIATION_ROUNDS` and `DEFAULT_STRATEGY` back-compat aliases from `config.py` (no live code references them once `graph/` is gone).
 - `python-multipart` (required by FastAPI form parsing) is already in `requirements.txt` — no dep change needed.
 - `must_not_keywords` arrives from the form as a single comma-separated string; splitting into `list[str]` happens server-side in the `POST /searches` handler before it's passed to `repo.create_search()`.
@@ -175,3 +177,4 @@ Three tests, kept lightweight (no live Anthropic calls in CI):
 - SSE/live updates — step 7+.
 - Edit-after-create or re-run-search — backlog.
 - Server-side rate limiting on the parse endpoint — personal-use, single user.
+- Autonomous retail purchase (Amazon/Walmart auto-checkout). Decision (2026-06-13): every buy stays human-confirmed; the agent surfaces the best listing and the human clicks the buy URL. Removes any need for local Playwright or account-logged-in automation. Reference-price scraping via Apify is read-only/anonymous and carries no ban exposure on our accounts.
