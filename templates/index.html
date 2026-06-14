@@ -4,7 +4,29 @@
 <section class="hero">
     <h1>ScraperAgent</h1>
     <p>Tell me what you want. I'll find it, price-check it, and negotiate on eBay.</p>
-    <p class="placeholder">Criteria form lands in the next build step. For now: foundation only.</p>
+</section>
+
+<section class="new-search">
+    <h2>New search</h2>
+    <form action="/searches" method="post" class="criteria-form">
+        <label class="nl">
+            Describe what you want
+            <textarea name="criteria_nl" rows="3"
+                      placeholder="red iPhone 13 mini, 128GB+, unlocked, under $300, seller rating 98%+"></textarea>
+        </label>
+
+        <button type="button"
+                hx-post="/searches/parse"
+                hx-include="[name='criteria_nl']"
+                hx-target="#structured-fields"
+                hx-swap="outerHTML">
+            Parse with Claude
+        </button>
+
+        {% include "_criteria_form_fields.html" %}
+
+        <button type="submit" class="primary">Start search</button>
+    </form>
 </section>
 
 <section>
@@ -15,7 +37,7 @@
             <tbody>
                 {% for s in recent_searches %}
                 <tr>
-                    <td>{{ s.id }}</td>
+                    <td><a href="/searches/{{ s.id }}">{{ s.id }}</a></td>
                     <td>{{ s.criteria_nl }}</td>
                     <td>${{ "%.2f"|format(s.max_price) }}</td>
                     <td>{{ s.status }}</td>
