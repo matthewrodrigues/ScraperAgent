@@ -27,9 +27,10 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="ScraperAgent", lifespan=lifespan)
 
-from api.routes import searches_router
+from api.routes import ebay_notifications_router, searches_router
 
 app.include_router(searches_router)
+app.include_router(ebay_notifications_router)
 app.mount("/static", StaticFiles(directory=str(config.STATIC_DIR)), name="static")
 templates = Jinja2Templates(directory=str(config.TEMPLATES_DIR))
 

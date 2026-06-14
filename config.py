@@ -24,6 +24,12 @@ EBAY_USER_TOKEN = os.getenv("EBAY_USER_TOKEN")
 EBAY_OAUTH_REFRESH_TOKEN = os.getenv("EBAY_OAUTH_REFRESH_TOKEN")
 EBAY_ENV = os.getenv("EBAY_ENV", "production")  # or "sandbox"
 
+# Marketplace Account Deletion notification — required for eBay production keysets.
+# eBay POSTs deletion events here; on first registration they GET with a challenge
+# that we hash with the verification token + endpoint URL.
+EBAY_DELETION_ENDPOINT_URL = os.getenv("EBAY_DELETION_ENDPOINT_URL", "")
+EBAY_DELETION_VERIFICATION_TOKEN = os.getenv("EBAY_DELETION_VERIFICATION_TOKEN", "")
+
 # Apify
 APIFY_TOKEN = os.getenv("APIFY_TOKEN")
 APIFY_BUDGET_USD = float(os.getenv("APIFY_BUDGET_USD", "0.50"))
