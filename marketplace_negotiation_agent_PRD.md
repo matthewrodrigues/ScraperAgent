@@ -289,3 +289,192 @@ Because the user approves every outgoing message anyway, 24/7 uptime adds no rea
 - Listing screenshots in the dashboard
 - Multiple concurrent searches per user in the UI (schema already supports it)
 - Configurable seller-facing persona/voice
+
+### Best Offer (`PlaceOffer`) integration — planned next-iteration send path
+
+**Problem this solves:** The current Send button uses
+`AddMemberMessageAAQToPartner`, which eBay rejects with "sender or recipient
+is not the partner of the transaction" whenever the buyer has no prior
+relationship with the seller. For a marketplace negotiation agent contacting
+*stranger sellers pre-purchase*, that's the entire use case — and the call
+silently fails for most listings. The user currently has to copy-paste
+manually and mark the message sent via a dedicated button.
+
+**The fix:** eBay's `PlaceOffer` Trading API call is the official pre-purchase
+contact channel. It works without a prior transaction relationship, and it
+accepts both an `Amount` (the offer) and a free-text `Message` field — exactly
+matching our existing `offer_amount` + `body` shape. Critically, placing a
+Best Offer *creates* the transaction-partner relationship, which then unlocks
+`AddMemberMessageAAQToPartner` for subsequent counter rounds and unlocks
+`GetMyMessages` for reading seller responses.
+
+**Detection:** Browse API responses already include a `buyingOptions` array
+that contains `"BEST_OFFER"` when the listing accepts offers. No new API call
+is needed to know whether a given listing is eligible. We just check this
+field at selection time.
+
+**Proposed flow for the dashboard:**
+
+1. After the user approves the drafted message, the Send button renders in
+   one of two modes based on `buyingOptions`:
+   - Listing accepts Best Offer → button says **"Place Offer ($X) via eBay"**;
+     calls `PlaceOffer` with the offer_amount + body.
+   - Listing does NOT accept Best Offer → button says **"Send message"** and
+     attempts AAQToPartner (works only if a prior transaction exists);
+     otherwise falls back to the manual copy-paste flow we have today.
+2. Once a Best Offer is placed, `negotiation.status` → `awaiting_seller`
+   exactly as it does today after a successful AAQ send. The counter round
+   uses AAQ (which now works because Best Offer created the relationship).
+3. Seller's accept/counter/decline arrives via `GetBestOffers` rather than
+   `GetMyMessages` for the first round (since it's a structured offer
+   response, not a freeform message). After round 1, both channels are valid.
+
+**Implementation scope (rough):**
+
+- `integrations/ebay_trading.py`: `place_best_offer(item_id, recipient_id, amount, message) -> offer_id`; `get_best_offer_status(offer_id) -> dict`.
+- `db/repo.py`: `set_best_offer_id(negotiation_id, offer_id)` to track the offer reference for `GetBestOffers` polling.
+- Schema: add `negotiations.ebay_best_offer_id TEXT` column (nullable) via the existing column-migration helper.
+- `browser/ebay.py`: thread `buyingOptions` through into the persisted listing data so the route can read it.
+- `api/routes/searches.py`: branch in the Send route on `BEST_OFFER` availability; one new route `POST .../listings/{lid}/check-offer-status` for polling.
+- Template: dynamic button label + an "offer placed: pending seller" state.
+- Tests: mocked `PlaceOffer` happy path, declined offer path, listing-doesn't-support-BO error path.
+
+Estimated effort: ~3-4 hours (similar to the original messaging integration,
+since we already have the Trading API plumbing and the multi-round graph).
+
+**Why this is deferred, not v1:** Sender-doesn't-know-best-offer-isn't-enabled
+is a tolerable failure mode today (clear error notice, manual fallback works).
+Best Offer integration is genuinely the *right* answer but warrants its own
+focused session — particularly the seller-response polling, which has a
+different shape than messaging-API polling.
+
+---
+
+## Next sessions (planned, in priority order)
+
+This section captures the work we know we want next, sized as focused sessions
+rather than open-ended exploration. Each item is independently shippable —
+they're listed in order of *value-per-effort* given the current state of the
+system (as of 2026-06-17).
+
+### Session 1 — Best Offer integration (top priority)
+
+See the `### Best Offer (PlaceOffer) integration` subsection above for the
+full spec. Short version:
+
+- **Why first:** Today's Send button only works on listings where the buyer
+  already has a transaction relationship with the seller — which excludes
+  most of the listings the agent is designed for (pre-purchase contact with
+  stranger sellers). Best Offer is the *official* pre-purchase channel and
+  unlocks API send for every BO-enabled listing (a meaningful fraction,
+  especially in used-goods categories).
+- **Effort:** ~3-4 hours. The hard parts (Trading API XML auth, round-state
+  tracking, human approval gate, multi-round graph) all already exist.
+- **Definition of done:** Select a BO-enabled listing, draft + approve, click
+  "Place Offer ($X)", see the offer reflected on eBay's site, get the
+  seller's accept/counter/decline back via `GetBestOffers` polling.
+
+### Session 2 — Reference-price-based listing ranking + display
+
+PRD §98 specifies ranking listings by `(price - ref_median_used) / ref_median_used`
+("cheapest relative to market first") rather than absolute price. We gather
+the reference-price data today but never use it for ranking — the listings
+table is still sorted purely by `price ASC` (from `discover` + persisted
+`list_listings` order).
+
+**Concrete changes:**
+
+- `db/repo.list_listings(search_id)` adds an optional `order_by_gap=True`
+  parameter that joins against `reference_prices` and sorts by computed gap.
+- Detail-page template gets a "vs. market" column per row: e.g. `$189
+  (32% under)` in green, or `$320 (15% over)` in red.
+- Sort order on the listings table flips to gap-ascending (most discounted
+  first) when ref-prices are available; falls back to price-ascending when
+  they're not.
+- A small visual cue per listing — green badge for "good price" (gap ≤ -10%),
+  red for "overpriced" (gap ≥ +15%) — matching the same thresholds the
+  strategy chooser uses, so the user immediately sees *which strategy will
+  fire* before clicking Select.
+
+**Why this is next-after-Best-Offer:** Pure UX/relevance win using data we
+already have. Zero new API integrations. The "we gather ref-prices but the
+user can't tell what they mean" disconnect is the biggest under-utilization
+of work already shipped. Estimated effort: ~1-2 hours.
+
+### Session 3 — Auto-polling seller replies (Option B from §multi-round)
+
+When we built `POST .../check-replies`, we explicitly chose manual button
+over background polling for v1. Once a few real negotiations are running,
+"remember to come back and click Check Replies" will get annoying.
+
+**Concrete changes:**
+
+- A FastAPI startup hook spawns an `asyncio.create_task` loop that polls
+  every 5 minutes for all active negotiations (`negotiations.status IN ('awaiting_seller', 'open')`)
+- Per-negotiation call to `ebay_trading.get_messages_for_item` + the existing
+  dedup logic + auto-counter trigger
+- Rate-limit budget: ~12 calls/hour per active negotiation; eBay's Trading
+  daily cap is 5000/day so a handful of parallel negotiations is fine
+- Dashboard polling already picks up the new state when the user is on the
+  page; no UI change needed.
+
+**Why deferred to session 3:** Only worth building once you have real
+negotiations that take more than one sitting to complete. For a few quick
+back-and-forths, manual clicks are fine. Estimated effort: ~1-2 hours.
+
+### Session 4 — Email summaries via Gmail integration
+
+PRD §147 specifies a "deal closed" / "no deal" summary email at terminal
+states. Gmail OAuth client config + paths are already in `config.py`
+(`GMAIL_CLIENT_SECRETS_PATH`, `GMAIL_TOKEN_PATH`, `GMAIL_SENDER`); the
+integration module itself doesn't exist.
+
+**Concrete changes:**
+
+- `integrations/email.py`: one-time OAuth consent flow on first call (stores
+  refresh token in `./secrets/gmail_token.json`); `send_summary(search_id,
+  outcome)` that pulls the negotiation + messages + reference-price stats and
+  renders an email template.
+- Two trigger points: `mark_deal` route fires the success template, `walk_away`
+  fires the no-deal template.
+- No new UI — the email is the surface.
+
+**Why session 4 and not earlier:** Email summaries are mostly nice-to-have
+for personal use. You already see everything on the dashboard the moment it
+happens. The integration is also gnarlier than the others (OAuth consent
+flow, first-run user interaction). Worth doing eventually but not soon.
+Estimated effort: ~2-3 hours, most of it OAuth plumbing.
+
+### Smaller follow-ups (any time, ~30-60 min each)
+
+- **Token-expiry warning:** The legacy Auth'n'Auth token in `.env` lasts ~18
+  months. Add a startup check that warns if it's within 30 days of expiry so
+  it doesn't fail silently at the worst moment.
+- **Per-search cost dashboard:** We already track Apify cost via
+  `sum_apify_cost`. Add a per-search Claude-token cost (Anthropic SDK returns
+  usage) and surface a small "this search cost $X total" stat on the detail
+  page.
+- **Reference-prices: add more sources.** PRD names `amazon`, `walmart`,
+  `target`, `bestbuy` actors — adding each is roughly one file + tests. Worth
+  doing only once you've validated google_shopping data is consistently
+  useful for the items you actually search for.
+- **Strategy A/B logging:** `negotiations.strategy_inputs_json` already
+  captures everything; nothing reads it back. A simple `/strategies/stats`
+  page showing "anchor_low: 8 used, 3 deals, avg savings 12%" would inform
+  whether the rules table needs tuning.
+
+### Maintenance / debt items (do when something breaks)
+
+- **Pin `apify-client>=2,<4`** in requirements.txt rather than the exact
+  3.0.2 we have today. The 1.x→2.x break was painful; we should at least
+  signal that 2.x+ is required without locking ourselves to a specific patch.
+- **Drop the `EBAY_USER_TOKEN = "..."` line from `.env.example` (if it
+  exists) or document the manual token-generation flow** somewhere a future
+  reader of the repo would find it. The auth setup is the single biggest
+  onboarding tripwire.
+- **Move the `scratch_*.py` smokes into a `scripts/` directory** with a
+  short README explaining when to run each. They're load-bearing
+  (caught all three Trading API gotchas) but currently scattered at repo
+  root with no signposting.
+
+---

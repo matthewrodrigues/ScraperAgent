@@ -1,0 +1,400 @@
+{# Renders the dynamic portion of the search detail page (status, listings, error).
+   Used both by GET /searches/{id} as part of the full page, and by POST .../select
+   and GET .../content as an HTMX swap target. The outer <div id="search-content">
+   is the swap anchor — select/deselect buttons and the polling loop all target it.
+
+   When status is pending/discovering, the div carries hx-trigger="every 3s" so HTMX
+   re-fetches this fragment until the graph finishes. The polling attributes
+   disappear from the rendered HTML as soon as status leaves those states, which
+   causes HTMX to stop polling automatically. #}
+{# Polling fires whenever something out-of-band is happening that the user
+   would want to see when it lands. Three classes of "in-flight":
+     * search graph (discovery / reference-price fetch) running
+     * Claude drafting an opening message or counter
+     * Playwright browser-send mid-task (form-fill → review-page → wait for
+       user click on eBay's UI → confirmation detect)
+   Each flips the polling on; when all three are quiet, the rendered HTML
+   stops including the hx-trigger attributes and HTMX stops polling. #}
+{% set _is_in_flight = (
+    search.status in ('pending', 'discovering')
+    or is_drafting
+    or is_browser_sending
+) %}
+<div id="search-content"
+     {% if _is_in_flight %}
+     hx-get="/searches/{{ search.id }}/content"
+     hx-trigger="every 3s"
+     hx-swap="outerHTML"
+     {% endif %}
+     >
+    <p class="muted">Submitted {{ search.created_at }} · status: <strong>{{ search.status }}</strong></p>
+    {# Cost summary: Apify scraping + Claude drafting. Criteria-parser cost
+       (Haiku) is deliberately excluded — it's < 1% of the total and the parse
+       route is decoupled from search creation. See
+       `.claude/plans/lets-do-the-per-refactored-kahan.md` for the rationale. #}
+    <p class="muted cost-summary">
+        Search cost: <strong>${{ "%.2f"|format(costs.total) }}</strong>
+        <span class="cost-breakdown">(Apify ${{ "%.2f"|format(costs.apify) }}, Claude ${{ "%.2f"|format(costs.claude) }})</span>
+    </p>
+
+    {% if reference_prices %}
+        <section class="reference-prices">
+            <h2>Reference prices</h2>
+            <table class="ref-prices">
+                <thead>
+                    <tr><th>Source</th><th>Condition</th><th>p25</th><th>Median</th><th>p75</th></tr>
+                </thead>
+                <tbody>
+                    {% for r in reference_prices %}
+                    <tr>
+                        <td>{{ r.source }}</td>
+                        <td>{{ r.condition or "—" }}</td>
+                        <td>{{ "$%.2f"|format(r.p25) if r.p25 is not none else "—" }}</td>
+                        <td><strong>{{ "$%.2f"|format(r.median) if r.median is not none else "—" }}</strong></td>
+                        <td>{{ "$%.2f"|format(r.p75) if r.p75 is not none else "—" }}</td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </section>
+    {% endif %}
+
+    {% if search.status == 'failed' %}
+        <div class="error-banner">
+            <h2>Search failed</h2>
+            <p>{{ search.error_message or "Unknown error." }}</p>
+        </div>
+    {% elif selected %}
+        {# Selected branch comes BEFORE the in-flight check on purpose: when
+           status='negotiating' AND no pending_message yet, we're still
+           technically "in flight" (polling for the drafter to finish) — but
+           the user has already picked a listing, so we want to show the
+           selected-listing view with a "drafting..." indicator inside it,
+           NOT the generic "Searching eBay…" placeholder. #}
+        <h2>Selected for negotiation</h2>
+        <table class="listings selected">
+            <thead>
+                <tr><th>Price</th><th>vs Market</th><th>Condition</th><th>Seller</th><th>Title</th><th></th></tr>
+            </thead>
+            <tbody>
+                <tr class="selected-row">
+                    <td>${{ "%.2f"|format(selected.price) }}</td>
+                    <td>
+                        {% if selected.badge %}
+                            <span class="bo-badge {{ selected.badge[1] }}" title="{{ selected.badge[0] }}">
+                                {{ selected.badge[0] }} {{ "%+.0f"|format(selected.gap * 100) }}%
+                            </span>
+                        {% else %}
+                            <span class="muted">—</span>
+                        {% endif %}
+                    </td>
+                    <td>{{ selected.condition or "—" }}</td>
+                    <td>{{ "%.1f%%"|format(selected.seller_rating) if selected.seller_rating is not none else "—" }}</td>
+                    <td><a href="{{ selected.url }}" target="_blank" rel="noopener">{{ selected.title }}</a></td>
+                    <td>
+                        <button
+                            type="button"
+                            hx-post="/searches/{{ search.id }}/listings/{{ selected.id }}/deselect"
+                            hx-target="#search-content"
+                            hx-swap="outerHTML">
+                            Deselect
+                        </button>
+                    </td>
+                </tr>
+            </tbody>
+        </table>
+        {# Negotiation status banner: deal / walked-away / round counter #}
+        {% if negotiation and negotiation.status == 'deal' %}
+            <section class="terminal deal">
+                <h2>Deal closed at ${{ "%.2f"|format(negotiation.final_price) }}</h2>
+                <p class="muted">Closed {{ negotiation.deal_at }}. <a href="/">Start a new search</a></p>
+            </section>
+        {% elif negotiation and negotiation.status == 'walked_away' %}
+            <section class="terminal walked-away">
+                <h2>Walked away</h2>
+                <p class="muted">Negotiation ended {{ negotiation.walked_away_at }}. <a href="/">Start a new search</a></p>
+            </section>
+        {% elif negotiation %}
+            <p class="muted">
+                Negotiation round <strong>{{ negotiation.rounds }}</strong> of {{ max_rounds }}
+                · strategy: <strong>{{ negotiation.strategy }}</strong>
+            </p>
+        {% endif %}
+
+        {# Message thread — chronological agent + seller turns. Renders for any
+           non-terminal state once messages exist. #}
+        {% if messages %}
+            <section class="message-thread">
+                <h2>Conversation</h2>
+                {% for m in messages %}
+                    <article class="msg msg-{{ m.role }} msg-status-{{ m.status }}">
+                        <header>
+                            <strong>{{ "You" if m.role == "agent" else "Seller" }}</strong>
+                            {% if m.role == "agent" and m.offer_amount %}
+                                · offer ${{ "%.2f"|format(m.offer_amount) }}
+                            {% endif %}
+                            · <em>{{ m.status }}</em>
+                            {% if m.sent_at %} · sent {{ m.sent_at }}{% endif %}
+                        </header>
+                        <p>{{ m.body }}</p>
+                    </article>
+                {% endfor %}
+            </section>
+        {% endif %}
+
+        {# State-dependent action panel below the thread. Terminal states show nothing here. #}
+        {% if negotiation and negotiation.status not in ('deal', 'walked_away') %}
+
+            {% if pending_message and not has_unsent_pending %}
+                {# State: draft pending approval (round 1 or counter).
+                   The offer_amount is now an editable input — required by the
+                   PlaceOffer path, which sends this exact value as the
+                   structured offer to eBay. Editing the body alone doesn't
+                   change the price. Capped at search.max_price (PRD §187). #}
+                <section class="pending-message">
+                    <h2>Draft ready — review &amp; approve</h2>
+                    <p class="muted">
+                        Strategy: <strong>{{ pending_message.negotiation_strategy }}</strong>
+                    </p>
+                    <form
+                        hx-post="/searches/{{ search.id }}/messages/{{ pending_message.id }}/approve"
+                        hx-target="#search-content"
+                        hx-swap="outerHTML">
+                        <label for="offer_amount_input">Offer amount ($)</label>
+                        <input id="offer_amount_input"
+                               type="number"
+                               name="offer_amount"
+                               step="0.01"
+                               min="0.01"
+                               max="{{ search.max_price }}"
+                               value="{{ "%.2f"|format(pending_message.offer_amount) }}"
+                               required>
+                        <p class="muted">Cap: ${{ "%.2f"|format(search.max_price) }} (buyer's max).</p>
+                        <textarea name="body" rows="6" required minlength="20">{{ pending_message.body }}</textarea>
+                        <p class="muted">Edit the text and/or price inline, then click Approve.</p>
+                        <button type="submit">Approve</button>
+                    </form>
+                </section>
+
+            {% elif has_unsent_pending %}
+                {# State: approved, not yet sent.
+                   Two sub-states distinguished by send_blocked:
+                     * unset → user hasn't clicked Send yet; show the send button.
+                       Button label varies by BO-eligibility (Send via Browser
+                       for BO, Send via eBay for AAQ).
+                     * "no_partner" → AAQ failed for non-BO listing because no
+                       transaction relationship. Paste-and-mark-sent flow. #}
+                {% set approved = (messages | selectattr("status", "equalto", "approved") | selectattr("role", "equalto", "agent") | list | last) %}
+                {% set _bo_eligible = selected.buying_options and "BEST_OFFER" in (selected.buying_options or "").split(",") %}
+                <section class="awaiting-send">
+                    <h2>Approved — send to seller</h2>
+
+                    {% if send_blocked == "no_partner" %}
+                        <div class="notice manual-only">
+                            <strong>Manual contact required for this listing.</strong>
+                            <p>eBay only allows automated messages once you have a transaction
+                               relationship with the seller (prior purchase, Best Offer, or won bid).
+                               Copy the message below and use eBay's "Contact seller" link instead.</p>
+                        </div>
+                    {% endif %}
+
+                    <p class="muted">Sending offer: <strong>${{ "%.2f"|format(approved.offer_amount) }}</strong></p>
+                    <pre class="copyable-message">{{ approved.body }}</pre>
+
+                    {% if send_blocked != "no_partner" %}
+                        <form
+                            hx-post="/searches/{{ search.id }}/messages/{{ approved.id }}/send"
+                            hx-target="#search-content"
+                            hx-swap="outerHTML"
+                            hx-confirm="{% if _bo_eligible %}This will open Chrome with the offer filled in. You'll click Send Offer on eBay's UI to finish. Continue?{% else %}This will send the message to the seller's eBay inbox. Continue?{% endif %}">
+                            {% if _bo_eligible %}
+                                <button type="submit">Send via Browser (${{ "%.2f"|format(approved.offer_amount) }})</button>
+                            {% else %}
+                                <button type="submit">Send via eBay</button>
+                            {% endif %}
+                        </form>
+                        <details>
+                            <summary>...or copy &amp; paste manually as a fallback</summary>
+                            <p class="muted">Open the listing on eBay and paste the text above into the offer / message field.</p>
+                        </details>
+                    {% else %}
+                        <p class="muted">After you've sent the message via eBay's UI, click below
+                           to advance the round counter and unlock the seller-reply tracker:</p>
+                        <form
+                            hx-post="/searches/{{ search.id }}/messages/{{ approved.id }}/mark-sent"
+                            hx-target="#search-content"
+                            hx-swap="outerHTML">
+                            <button type="submit">I've sent it manually — track as round {{ negotiation.rounds + 1 }}</button>
+                        </form>
+                    {% endif %}
+                </section>
+
+            {% elif is_browser_sending %}
+                {# State: browser-send BackgroundTask is running. Playwright
+                   has opened Chrome, filled the offer form, and navigated to
+                   eBay's review page. We're waiting up to 5 min for the user
+                   to click "Send Offer" in the Chrome window — the task polls
+                   for the resulting confirmation URL/text and either marks the
+                   message sent (success) or reverts to 'approved' (timeout /
+                   browser closed). HTMX keeps polling this fragment every 3s;
+                   the moment the task flips state, the rendered branch swaps. #}
+                <section class="browser-sending">
+                    <h2>Browser opened — finish on eBay</h2>
+                    <p class="placeholder">
+                        Chrome should be open with the offer + message filled in.
+                        Click <strong>"Send Offer"</strong> on eBay's UI to complete.
+                        This page will update automatically when eBay confirms.
+                    </p>
+                    <p class="muted">
+                        If you closed the browser by accident or want to start over,
+                        wait for the timeout (~5 min) — the offer will revert to ready-to-send
+                        and you can click Send via Browser again.
+                    </p>
+                </section>
+
+            {% elif is_drafting %}
+                <p class="placeholder">Drafting message… this usually takes ~5 seconds.</p>
+
+            {% elif negotiation.status == 'awaiting_seller' or negotiation.rounds >= max_rounds %}
+                {# State: agent message sent, waiting for seller. Or round cap hit. #}
+                {% if negotiation.rounds >= max_rounds %}
+                    <section class="round-cap">
+                        <h2>3-round cap reached</h2>
+                        <p class="muted">No more counters. Close this out by marking the deal or walking away.</p>
+                    </section>
+                {% else %}
+                    <section class="awaiting-seller">
+                        <h2>Waiting for seller reply</h2>
+                        {% if negotiation.ebay_best_offer_id %}
+                            {# BO was placed → poll the structured offer status,
+                               which surfaces accept/decline/counter cleanly. #}
+                            <form
+                                hx-post="/searches/{{ search.id }}/listings/{{ selected.id }}/check-offer-status"
+                                hx-target="#search-content"
+                                hx-swap="outerHTML">
+                                <button type="submit">Check offer status</button>
+                            </form>
+                        {% else %}
+                            <form
+                                hx-post="/searches/{{ search.id }}/listings/{{ selected.id }}/check-replies"
+                                hx-target="#search-content"
+                                hx-swap="outerHTML">
+                                <button type="submit">Check for new replies</button>
+                            </form>
+                        {% endif %}
+                        <details>
+                            <summary>Paste seller's reply manually (fallback)</summary>
+                            <form
+                                hx-post="/searches/{{ search.id }}/listings/{{ selected.id }}/paste-reply"
+                                hx-target="#search-content"
+                                hx-swap="outerHTML">
+                                <textarea name="body" rows="4" required minlength="5"
+                                          placeholder="Paste the seller's response here…"></textarea>
+                                <button type="submit">Record reply &amp; draft counter</button>
+                            </form>
+                        </details>
+                    </section>
+                {% endif %}
+            {% endif %}
+
+            {# Always-visible terminal actions during an active negotiation. #}
+            <section class="terminal-actions">
+                <form
+                    hx-post="/searches/{{ search.id }}/listings/{{ selected.id }}/deal"
+                    hx-target="#search-content"
+                    hx-swap="outerHTML"
+                    style="display:inline-block; margin-right:1em">
+                    <input type="number" name="final_price" step="0.01" min="0.01"
+                           max="{{ search.max_price }}" required placeholder="Final $"/>
+                    <button type="submit">Mark as deal</button>
+                </form>
+                <form
+                    hx-post="/searches/{{ search.id }}/listings/{{ selected.id }}/walk-away"
+                    hx-target="#search-content"
+                    hx-swap="outerHTML"
+                    hx-confirm="Walk away from this negotiation? This is terminal."
+                    style="display:inline-block">
+                    <button type="submit">Walk away</button>
+                </form>
+            </section>
+        {% endif %}
+
+        {% if listings | length > 1 and search.status != 'awaiting_send' %}
+        <details>
+            <summary>Other {{ listings | length - 1 }} candidate{{ '' if listings|length == 2 else 's' }} (not selected)</summary>
+            <table class="listings dimmed">
+                <tbody>
+                    {% for l in listings if l.id != selected.id %}
+                    <tr>
+                        <td>${{ "%.2f"|format(l.price) }}</td>
+                        <td>{{ l.condition or "—" }}</td>
+                        <td>{{ "%.1f%%"|format(l.seller_rating) if l.seller_rating is not none else "—" }}</td>
+                        <td><a href="{{ l.url }}" target="_blank" rel="noopener">{{ l.title }}</a></td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </details>
+        {% endif %}
+    {% elif _is_in_flight %}
+        <p class="placeholder">Searching eBay and gathering reference prices… this usually takes 20–60 seconds.</p>
+    {% elif listings %}
+        <h2>Found {{ listings | length }} listing{{ '' if listings|length == 1 else 's' }} — pick one to negotiate</h2>
+        <p class="muted">
+            <span class="bo-badge">Best Offer</span> = listing accepts structured offers via eBay's API (preferred — no manual paste needed).
+        </p>
+        <table class="listings">
+            <thead>
+                <tr>
+                    <th>Price</th>
+                    <th>vs Market</th>
+                    <th>Condition</th>
+                    <th>Seller</th>
+                    <th>Title</th>
+                    <th>Offers</th>
+                    <th></th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for l in listings %}
+                <tr>
+                    <td>${{ "%.2f"|format(l.price) }}</td>
+                    <td>
+                        {# Badge color matches the strategy that would fire if this row
+                           is selected (under=time_pressure / near=split / over=anchor_low).
+                           No badge when ref_median is unavailable. #}
+                        {% if l.badge %}
+                            <span class="bo-badge {{ l.badge[1] }}" title="{{ l.badge[0] }}">
+                                {{ l.badge[0] }} {{ "%+.0f"|format(l.gap * 100) }}%
+                            </span>
+                        {% else %}
+                            <span class="muted">—</span>
+                        {% endif %}
+                    </td>
+                    <td>{{ l.condition or "—" }}</td>
+                    <td>{{ "%.1f%%"|format(l.seller_rating) if l.seller_rating is not none else "—" }}</td>
+                    <td><a href="{{ l.url }}" target="_blank" rel="noopener">{{ l.title }}</a></td>
+                    <td>
+                        {% if l.buying_options and "BEST_OFFER" in (l.buying_options or "").split(",") %}
+                            <span class="bo-badge" title="This listing accepts Best Offer">Best Offer</span>
+                        {% else %}
+                            <span class="muted" title="No Best Offer — message send may fail pre-purchase">—</span>
+                        {% endif %}
+                    </td>
+                    <td>
+                        <button
+                            type="button"
+                            hx-post="/searches/{{ search.id }}/listings/{{ l.id }}/select"
+                            hx-target="#search-content"
+                            hx-swap="outerHTML">
+                            Select
+                        </button>
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    {% else %}
+        <p class="placeholder">No listings matched your criteria.</p>
+    {% endif %}
+</div>

@@ -62,3 +62,66 @@ th, td {
 }
 th { background: #fafafa; font-weight: 600; }
 tbody tr:last-child td { border-bottom: none; }
+
+/* Best Offer eligibility badge in the listings table */
+.bo-badge {
+    display: inline-block;
+    padding: 0.1rem 0.5rem;
+    background: #e8f5e9;
+    color: #1b5e20;
+    border: 1px solid #66bb6a;
+    border-radius: 10px;
+    font-size: 0.8em;
+    font-weight: 600;
+    white-space: nowrap;
+}
+
+/* External-link button used by the assisted-handoff BO flow — opens eBay's
+   listing page in a new tab. Styled as a primary action so it's the obvious
+   next click after seeing the drafted offer + body. */
+.external-link-button {
+    display: inline-block;
+    padding: 0.5rem 1rem;
+    margin: 0.5rem 0;
+    background: var(--accent, #0064d2);
+    color: white;
+    text-decoration: none;
+    border-radius: 4px;
+    font-weight: 600;
+}
+.external-link-button:hover {
+    background: #004fa3;
+}
+.external-link-button::after {
+    content: " \2197";
+}
+
+/* "vs Market" badges in the listings table. Reuse .bo-badge for shape and
+   font; these three classes override the color palette. Thresholds map to
+   strategy chooser thresholds:
+     under = time_pressure  (gap <= 0)
+     near  = split_the_difference  (0 < gap < 15%)
+     over  = anchor_low  (gap >= 15%)
+   Picking a row tells the user which strategy will fire on it. */
+.badge-under {
+    background: #e8f5e9;
+    color: #1b5e20;
+    border-color: #66bb6a;
+}
+.badge-near {
+    background: #fff8e1;
+    color: #b27300;
+    border-color: #f9a825;
+}
+.badge-over {
+    background: #ffebee;
+    color: #b71c1c;
+    border-color: #ef5350;
+}
+
+/* Cost summary line under the status header. Keep it muted — it's a
+   reference number, not an actionable item. */
+.cost-summary .cost-breakdown {
+    opacity: 0.7;
+    font-size: 0.9em;
+}

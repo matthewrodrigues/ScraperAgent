@@ -12,8 +12,9 @@ CREATE TABLE IF NOT EXISTS searches (
     criteria_nl TEXT NOT NULL,
     criteria_structured_json TEXT NOT NULL,
     max_price REAL NOT NULL,
-    status TEXT NOT NULL DEFAULT 'pending',  -- pending | discovering | awaiting_selection | negotiating | done
+    status TEXT NOT NULL DEFAULT 'pending',  -- pending | discovering | awaiting_selection | negotiating | done | failed
     thread_id TEXT,                          -- LangGraph thread id
+    error_message TEXT,                      -- populated when status = 'failed' (e.g. eBay API error)
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     completed_at TEXT
 );

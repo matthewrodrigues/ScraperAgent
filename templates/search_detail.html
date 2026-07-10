@@ -3,7 +3,6 @@
 {% block content %}
 <section class="search-detail">
     <h1>Search #{{ search.id }}</h1>
-    <p class="muted">Submitted {{ search.created_at }} · status: <strong>{{ search.status }}</strong></p>
 
     <h2>What you asked for</h2>
     <blockquote>{{ search.criteria_nl }}</blockquote>
@@ -32,6 +31,6 @@
         </dd>
     </dl>
 
-    <p class="placeholder">Reference-price discovery & eBay search land in build steps 3–4.</p>
+    {% include "_search_content.html" %}
 </section>
 {% endblock %}
