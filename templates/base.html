@@ -14,6 +14,13 @@
         <a href="/" class="brand">ScraperAgent</a>
         <nav>
             <a href="/">Home</a>
+            {# Driven off the session rather than a per-template flag so the
+               login page (which extends this base) doesn't offer a logout. #}
+            {% if request.session.get("authed") %}
+            <form action="/logout" method="post" class="logout-form">
+                <button type="submit">Sign out</button>
+            </form>
+            {% endif %}
         </nav>
     </header>
     <main>

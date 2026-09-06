@@ -6,6 +6,8 @@ Lifecycle:
     - On shutdown: cancel the poller task; asyncio waits for clean exit.
     - Mounts: /static for CSS, /templates rendered via Jinja2
     - Routes: /health (liveness), / (search list + new search form)
+    - Auth: every route is closed by default; see `api/auth.py` for the
+      exempt list and the reasoning behind each entry.
 """
 
 import asyncio
@@ -16,9 +18,12 @@ from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from starlette.middleware.sessions import SessionMiddleware
 
 import config
 from agents.poller import poll_loop
+from api.auth import RequireAuthMiddleware
+from api.auth import router as auth_router
 from db import repo
 
 
@@ -49,8 +54,22 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="ScraperAgent", lifespan=lifespan)
 
+# Middleware order is load-bearing. Starlette builds the stack so that the LAST
+# registered middleware is the OUTERMOST, so SessionMiddleware must be added
+# after RequireAuthMiddleware — otherwise `request.session` doesn't exist yet
+# when the auth check runs and every request 500s.
+app.add_middleware(RequireAuthMiddleware)
+app.add_middleware(
+    SessionMiddleware,
+    secret_key=config.SESSION_SECRET,
+    session_cookie="scraperagent_session",
+    same_site="lax",
+    https_only=False,  # served over plain HTTP on localhost; TLS is terminated by the tunnel
+)
+
 from api.routes import ebay_notifications_router, searches_router
 
+app.include_router(auth_router)
 app.include_router(searches_router)
 app.include_router(ebay_notifications_router)
 app.mount("/static", StaticFiles(directory=str(config.STATIC_DIR)), name="static")

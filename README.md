@@ -57,7 +57,8 @@ agents/            LangGraph orchestration
   criteria_parser.py Claude Haiku natural-language -> structured criteria
   poller.py          background asyncio loop polling eBay for seller replies
 api/
-  main.py            FastAPI app, lifespan wiring, /health and / routes
+  main.py            FastAPI app, lifespan + middleware wiring, /health and / routes
+  auth.py            session-cookie auth: middleware, exempt list, login/logout
   routes/            searches (dashboard + actions), eBay deletion notifications
 browser/
   ebay.py            eBay Browse API listing search
@@ -72,6 +73,8 @@ strategies/          pure rules engine + per-strategy system prompts
 db/
   schema.sql         SQLite schema (searches, reference_prices, listings, ...)
   repo.py            data access layer
+scripts/
+  backup_profile.py  archives the Chrome profile (the one unreproducible file)
 templates/           Jinja2 + HTMX server-rendered fragments
 static/              CSS + self-hosted HTMX (no CDN)
 config.py            all environment-driven settings
@@ -111,6 +114,41 @@ never computes the offer amount — that is clamped in code to never exceed
   pre-flight estimate that aborts an actor before launch if it would breach.
   Actual spend is tracked from each run's reported usage.
 
+## Dashboard authentication
+
+Every route is closed by default. The dashboard spends real money (Anthropic
+tokens, Apify actor runs) and drives a Chrome session logged into your eBay
+account, so an unauthenticated dashboard is a spending and impersonation hole,
+not merely a data leak.
+
+Auth is a password (`DASHBOARD_PASSWORD`) exchanged for a signed session cookie,
+implemented in `api/auth.py`. Four paths stay open, and that list is the entire
+security boundary:
+
+| Path | Why it is exempt |
+|---|---|
+| `/health` | Liveness probe; returns a constant |
+| `/login` | The door itself |
+| `/static/*` | CSS and HTMX, needed to render the login page |
+| `/ebay/account-deletion` | eBay's servers call it and cannot authenticate |
+
+The eBay webhook is safe to expose because it is genuinely inert: the GET
+returns `sha256(challenge + token + endpoint)`, which reveals nothing to anyone
+without the verification token, and the POST only logs and returns 204.
+
+Two deliberate behaviors worth knowing:
+
+- **Fail closed.** An unset `DASHBOARD_PASSWORD` returns 503 on every protected
+  path rather than allowing access. A misconfigured deploy locks you out instead
+  of opening up.
+- **HTMX-aware.** The dashboard polls itself. On an expired session an HTMX
+  request gets `401` plus `HX-Redirect: /login` so the browser navigates, rather
+  than a 303 that HTMX would follow and swap a whole login page into a fragment
+  slot.
+
+To rotate the password, edit `.env` and restart. Changing `SESSION_SECRET`
+additionally invalidates every existing session.
+
 ## Best Offer via browser automation
 
 Buyer-initiated Best Offers and seller messaging run entirely through headed
@@ -142,18 +180,29 @@ pip install -r requirements.txt
 python -m playwright install chrome
 ```
 
-Copy the settings you need into a `.env` file at the repo root. Because offers
-and messaging go through Playwright rather than the buyer-scoped eBay APIs, no
-user OAuth token or refresh token is required — only the App ID + Cert ID
-keypair that authorizes listing search via the Browse API:
+Copy `.env.example` to `.env` and fill it in — it documents every setting the
+app reads, including which are required. Because offers and messaging go through
+Playwright rather than the buyer-scoped eBay APIs, no user OAuth token or refresh
+token is required for placing offers — only the App ID + Cert ID keypair that
+authorizes listing search via the Browse API.
+
+The minimum to boot:
 
 ```
+DASHBOARD_PASSWORD=       # required - an empty value locks the dashboard
+SESSION_SECRET=           # python -c "import secrets; print(secrets.token_hex(32))"
 ANTHROPIC_API_KEY=
 EBAY_APP_ID=
 EBAY_CERT_ID=
 EBAY_ENV=production
 APIFY_TOKEN=
-APIFY_BUDGET_USD=0.50
+```
+
+`.env` holds every credential the app has, in plaintext. Restrict it to your
+user account so other accounts on the machine can't read it:
+
+```
+icacls .env /inheritance:r /grant:r "%USERNAME%:F"
 ```
 
 Then authenticate the browser session on eBay. This is a one-time manual login
@@ -203,10 +252,22 @@ Dashboard pages:
 python -m pytest
 ```
 
-The suite (roughly 248 tests) covers the criteria parser, aggregator, cost
+The suite (roughly 280 tests) covers the criteria parser, aggregator, cost
 guard, Google Shopping wrapper, strategy chooser, both LangGraph graphs, the
 negotiator, the eBay search and Trading integrations, the background poller, the
-repo layer, the search routes, and the eBay deletion-notification endpoint.
+repo layer, the search routes, the eBay deletion-notification endpoint, dashboard
+auth, environment-driven paths, and the profile-backup script.
+
+Route tests sign in through the real login form rather than bypassing auth, so
+the middleware is exercised on every request the suite makes. There is
+deliberately no auth-bypass flag — that would be a second, less-tested path
+through the security boundary, and exactly the kind of thing that gets left
+enabled by accident.
+
+CI runs the suite on `ubuntu-latest` (`.github/workflows/ci.yml`). The Windows
+certificate shims in `config.py` are guarded behind `sys.platform == "win32"`
+and marked win32-only in `requirements.txt`, so Linux never installs a
+workaround for a problem it does not have.
 
 The `scratch_*.py` files at the repo root are manual smoke scripts (Trading API
 messaging, Google Shopping, browser login and offer placement, graph runs).
@@ -215,10 +276,79 @@ automated suite.
 
 ## Persistence
 
-State is a single SQLite database at `./scraperagent.db`. LangGraph uses a
+State is a single SQLite database, by default at `./scraperagent.db` and relocatable via `SCRAPERAGENT_DB_PATH` or `SCRAPERAGENT_DATA_DIR`. LangGraph uses a
 `SqliteSaver` checkpointer so graph state is durable across restarts. Core
 tables: `searches`, `reference_prices`, `listings`, `negotiations`, `messages`.
 See `db/schema.sql`.
+
+## Backing up the browser profile
+
+`secrets/ebay_chrome_profile/` is the only local state that cannot be
+regenerated by rerunning something — recreating it means an interactive eBay
+sign-in through `scratch_ebay_browser_login.py`, with whatever 2FA or captcha
+eBay serves that day. Everything else rebuilds itself: the database recreates on
+boot, tokens refetch, listings re-search.
+
+```
+python -m scripts.backup_profile              # defaults from config
+python -m scripts.backup_profile --keep 10
+```
+
+Archives land in `~/ScraperAgentBackups` by default — outside the repo and
+outside the OneDrive-synced desktop path, since the profile runs to hundreds of
+MB and a weekly copy into a synced folder would push all of it to the cloud
+every run. Override with `SCRAPERAGENT_BACKUP_DIR`. The five newest are kept;
+files the script did not create are never touched.
+
+Files Chrome has locked are skipped with a warning rather than aborting the run,
+so a scheduled backup works while the browser is open.
+
+To schedule it weekly (elevated prompt, adjusting the path):
+
+```
+schtasks /create /tn "ScraperAgent profile backup" /sc weekly /d SUN /st 03:00 ^
+  /tr "\"C:\Users\<you>\...\ScraperAgent\.venv\Scripts\python.exe\" -m scripts.backup_profile" ^
+  /sd 01/01/2026
+```
+
+Verify with `schtasks /query /tn "ScraperAgent profile backup"`, and run it once
+manually to confirm an archive appears before trusting the schedule.
+
+## Deployment
+
+This is a local-first tool by design. The Best Offer flow opens a visible Chrome
+window and waits up to five minutes for you to click eBay's final "Send Offer"
+button — there is a human at a screen in the critical path, so a headless host
+cannot run it unattended. The supported setup is therefore: run it on your own
+machine, and put a stable public HTTPS front door on it.
+
+That front door exists for one hard requirement: eBay production keysets need a
+permanent HTTPS endpoint for account-deletion notifications. An ngrok URL that
+changes on every restart means re-registering with eBay each time.
+
+**Cloudflare Tunnel + Access**, in outline:
+
+1. `cloudflared tunnel login`, then `cloudflared tunnel create scraperagent`
+2. Route a hostname you control to the tunnel and point it at
+   `http://127.0.0.1:8000`
+3. Install the tunnel as a Windows service so it survives reboots
+   (`cloudflared service install`)
+4. In the Cloudflare Zero Trust dashboard, add an **Access application** covering
+   the hostname, with a policy allowing only your email
+5. Add a **bypass policy** for the path `/ebay/account-deletion` — eBay's
+   servers cannot complete an Access login
+6. Set `EBAY_DELETION_ENDPOINT_URL` to the new permanent URL, rotate
+   `EBAY_DELETION_VERIFICATION_TOKEN`, restart, and re-register in eBay's
+   developer portal
+
+Cloudflare Access is the outer gate; `DASHBOARD_PASSWORD` remains the inner one.
+Keeping both means a misconfigured tunnel — or an accidental
+`python main.py --host 0.0.0.0` — degrades to "asks for a password" rather than
+"wide open".
+
+Two things that do **not** change for this setup: the app stays a single process
+(SQLite plus an in-process poller, so no horizontal scaling), and nothing needs
+containerizing.
 
 ## Technology
 
