@@ -37,12 +37,22 @@ load_dotenv()
 # ---- API keys / secrets ----
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
 
-# eBay developer keys + user OAuth token (user confirmed all four are present)
+# eBay credentials. Two independent auth paths, deliberately not unified:
+#
+#   * APP_ID + CERT_ID authorize the Browse API (listing search) through a
+#     client-credentials token that `browser/ebay.py` fetches and refreshes on
+#     its own. No user, no consent screen, nothing to store.
+#   * USER_TOKEN is a legacy Auth'n'Auth token (valid ~18 months) for the
+#     Trading API calls the seller-reply poller makes. There is no refresh
+#     token to manage: Auth'n'Auth tokens aren't refreshed, they're regenerated
+#     from eBay's developer portal when they expire.
+#
+# Buyer-side actions (Best Offer, seller messaging) use neither — they go
+# through the Playwright browser session. See `integrations/ebay_browser.py`.
 EBAY_APP_ID = os.getenv("EBAY_APP_ID")
 EBAY_CERT_ID = os.getenv("EBAY_CERT_ID")
 EBAY_DEV_ID = os.getenv("EBAY_DEV_ID")
 EBAY_USER_TOKEN = os.getenv("EBAY_USER_TOKEN")
-EBAY_OAUTH_REFRESH_TOKEN = os.getenv("EBAY_OAUTH_REFRESH_TOKEN")
 EBAY_ENV = os.getenv("EBAY_ENV", "production")  # or "sandbox"
 
 # Marketplace Account Deletion notification — required for eBay production keysets.
