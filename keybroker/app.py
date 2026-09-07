@@ -4,7 +4,8 @@ Transparent by default: forwards native vendor wire protocols with the owner's
 key substituted. Bodies are parsed only where keybroker.clamps requires it, and
 nothing but friends and spend is stored.
 
-Order matters: fail closed on missing owner keys, authenticate, clamp, check
+Order matters: fail closed on missing owner keys, authenticate, refuse
+off-allowlist paths and oversized bodies before reading them, clamp, check
 quota, forward, then meter. Metering last because it must never gate delivery.
 """
 
@@ -26,6 +27,13 @@ UPSTREAMS = {
 }
 
 _OWNER_KEY_ATTR = {"anthropic": "ANTHROPIC_API_KEY", "apify": "APIFY_TOKEN"}
+
+# Only the two Anthropic endpoints this app actually calls. An open /anthropic/*
+# route also exposes /v1/messages/batches, whose bodies nest max_tokens under
+# requests[].params (so the clamp misses them) and whose create response carries
+# no usage (so the meter records nothing) — hundreds of unclamped, unmetered
+# requests inside one 256 KB body. Everything else gets 404.
+_ANTHROPIC_ALLOWED_PATHS = {"v1/messages", "v1/messages/count_tokens"}
 
 # The friend's credential must never be relayed; host and content-length belong
 # to the inbound hop; accept-encoding is dropped so httpx hands us decoded bytes.
@@ -80,6 +88,25 @@ async def _proxy(vendor: str, path: str, request: Request) -> Response:
         log.warning("broker: rejected %s request from %s", vendor, client_host)
         return Response("Unauthorized.", status_code=401)
 
+    if vendor == "anthropic" and path.strip("/") not in _ANTHROPIC_ALLOWED_PATHS:
+        log.warning("broker: refused anthropic path %r for %s", path, friend["name"])
+        return Response("Not found.", status_code=404)
+
+    # Consult Content-Length before reading: request.body() buffers the whole
+    # payload, so without this an authenticated friend can exhaust broker memory
+    # with a multi-GB POST. ensure_size below stays as the backstop for absent
+    # or lying headers.
+    declared = request.headers.get("content-length")
+    if declared is not None:
+        try:
+            if int(declared) > clamps.MAX_BODY_BYTES:
+                return Response(
+                    f"{declared} bytes exceeds the {clamps.MAX_BODY_BYTES} byte cap",
+                    status_code=413,
+                )
+        except ValueError:
+            pass  # unparseable header; the post-read check will catch it
+
     body = await request.body()
     try:
         clamps.ensure_size(body)
@@ -90,6 +117,14 @@ async def _proxy(vendor: str, path: str, request: Request) -> Response:
     except clamps.StreamingUnsupported as exc:
         return Response(str(exc), status_code=400)
 
+    if vendor == "anthropic":
+        # Before quota.check and before anything is forwarded: an unpriced model
+        # meters at $0.00, which would leave both caps inert.
+        try:
+            clamps.ensure_priced_model(body)
+        except clamps.UnpricedModel as exc:
+            return Response(str(exc), status_code=400)
+
     try:
         quota.check(friend)
     except quota.QuotaExceeded as exc:
@@ -97,10 +132,13 @@ async def _proxy(vendor: str, path: str, request: Request) -> Response:
         # times, which would bury this behind a confusing delay.
         return Response(exc.detail, status_code=402)
 
+    params = dict(request.query_params)
     if vendor == "anthropic":
         body = clamps.clamp_anthropic(body)
     elif clamps.is_apify_run_creation(request.method, path):
-        body = clamps.clamp_apify_run(body, quota.remaining_usd(friend))
+        # The body is the actor's own input record and must survive untouched;
+        # Apify reads the run's spend ceiling from the query string instead.
+        params = clamps.clamp_apify_charge(params, quota.remaining_usd(friend))
 
     headers = {
         k: v for k, v in request.headers.items()
@@ -117,7 +155,7 @@ async def _proxy(vendor: str, path: str, request: Request) -> Response:
             f"{UPSTREAMS[vendor]}/{path}",
             content=body,
             headers=headers,
-            params=dict(request.query_params),
+            params=params,
         )
     except httpx.HTTPError as exc:
         log.warning("broker: upstream %s error: %s", vendor, exc)
