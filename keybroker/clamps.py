@@ -62,20 +62,27 @@ def ensure_not_streaming(body: bytes) -> None:
 
 
 def ensure_priced_model(body: bytes) -> None:
-    """Refuse Anthropic requests naming a model the broker cannot price.
+    """The broker serves a fixed menu of models; anything else is refused.
 
-    A 0.0 from config.price_usage() is not a valid meter reading: it would let a
-    friend spend without ever moving spend.cost_usd, so both the per-friend and
-    the global cap would go permanently inert. Unlike the other clamps this
-    rejects rather than rewrites — silently swapping a friend's model would be
-    worse than telling them no.
+    The menu is config.MODEL_PRICING's keys, deliberately not a separate list:
+    the invariant is "never serve a model you cannot price". A 0.0 from
+    config.price_usage() is not a valid meter reading — it would let a friend
+    spend without ever moving spend.cost_usd, leaving both caps inert — so the
+    two must not be able to drift apart.
+
+    Unlike the other clamps this rejects rather than rewrites: silently swapping
+    a friend's model would be worse than telling them no. The message names the
+    escape hatch, since a friend wanting a different model can simply bill it to
+    themselves.
     """
     payload = _load(body)
     model = payload.get("model") if payload is not None else None
     if not isinstance(model, str) or model not in config.MODEL_PRICING:
+        served = ", ".join(sorted(config.MODEL_PRICING))
         raise UnpricedModel(
-            f"model {model!r} is not priced by the broker; "
-            f"supported models: {', '.join(sorted(config.MODEL_PRICING))}"
+            f"This broker serves only: {served}. To use {model!r}, set your own "
+            f"ANTHROPIC_API_KEY and unset SCRAPERAGENT_BROKER_URL to bill it "
+            f"yourself."
         )
 
 

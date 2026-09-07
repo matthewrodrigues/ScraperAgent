@@ -414,13 +414,25 @@ lands at or under the budget; requests already in flight are not reserved
 against each other, so a burst of concurrent calls can overshoot by roughly that
 reservation per call in flight.
 
+**A fixed menu of models.** The broker serves only the models it knows how to
+price — the keys of `config.MODEL_PRICING`, Sonnet and Haiku by default. A
+request naming anything else is refused with a 400 that says so, because a model
+the broker cannot price would be billed to you and metered at $0.00, quietly
+disabling both caps above. The two lists are the same list on purpose, so they
+cannot drift apart.
+
+A friend who wants a different model is not stuck: they set their own
+`ANTHROPIC_API_KEY` and unset `SCRAPERAGENT_BROKER_URL`, and their copy talks to
+Anthropic directly on their own bill. The 400 message says this. There is
+deliberately no way to send a friend's own key *through* the broker — that would
+put your machine in custody of a credential it does not own, for no gain over
+going direct. If you would rather serve the new model yourself, add it to
+`MODEL_PRICING` with its rates and it becomes available to every friend.
+
 **What the broker will forward.** Only the two Anthropic endpoints this app
-uses — `/v1/messages` and `/v1/messages/count_tokens` — anything else on the
+uses — `/v1/messages` and `/v1/messages/count_tokens`. Anything else on the
 Anthropic side gets a 404, because paths like the Batches API slip past the
-per-request clamps and the spend meter. The model named in a request must also
-be one the broker knows how to price (`config.MODEL_PRICING`); an unknown model
-is refused with a 400 rather than being billed to you and metered at zero. If a
-friend's copy is pinned to a newer model, add it to `MODEL_PRICING` first.
+per-request clamps and the spend meter.
 
 **Two things worth knowing before you turn this on.** First, a friend's
 prompts and API responses pass through your machine's memory on their way to

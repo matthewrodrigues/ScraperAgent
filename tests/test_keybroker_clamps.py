@@ -115,6 +115,18 @@ def test_unpriced_model_is_rejected():
         clamps.ensure_priced_model(json.dumps({"model": "claude-made-up-9"}).encode())
 
 
+def test_rejection_names_the_menu_and_the_escape_hatch():
+    """The 400 is read by a friend, so it must be actionable, not diagnostic."""
+    with pytest.raises(clamps.UnpricedModel) as exc:
+        clamps.ensure_priced_model(json.dumps({"model": "claude-made-up-9"}).encode())
+    message = str(exc.value)
+    for served in config.MODEL_PRICING:
+        assert served in message
+    assert "claude-made-up-9" in message
+    assert "ANTHROPIC_API_KEY" in message
+    assert "SCRAPERAGENT_BROKER_URL" in message
+
+
 def test_missing_or_unparseable_model_is_rejected():
     """Fail closed: no model means no price, and no price means no cap."""
     with pytest.raises(clamps.UnpricedModel):
