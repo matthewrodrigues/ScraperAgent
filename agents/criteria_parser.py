@@ -12,6 +12,7 @@ from anthropic import Anthropic
 from pydantic import BaseModel, Field
 
 import config
+from integrations import clients
 
 
 ConditionFloor = Literal["new", "refurbished", "used", "any"]
@@ -97,7 +98,7 @@ _RECORD_CRITERIA_TOOL = {
 
 def parse_criteria(nl_text: str) -> ParsedCriteria:
     """Ask Haiku to extract structured criteria from a free-text description."""
-    client = Anthropic(api_key=config.ANTHROPIC_API_KEY)
+    client = Anthropic(**clients.anthropic_kwargs())
     response = client.messages.create(
         model=config.PARSER_MODEL,
         max_tokens=1024,

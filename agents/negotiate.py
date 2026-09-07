@@ -15,6 +15,7 @@ from anthropic import Anthropic
 from pydantic import BaseModel, Field, ValidationError
 
 import config
+from integrations import clients
 from strategies import Strategy
 
 
@@ -131,7 +132,7 @@ def draft_message(
     Raises NegotiationDraftError on any failure (no tool_use block, malformed
     input, offer above max_price). The usage dict is only returned on success
     — failed drafts didn't produce a billable message in the user's mind."""
-    client = Anthropic(api_key=config.ANTHROPIC_API_KEY)
+    client = Anthropic(**clients.anthropic_kwargs())
     response = client.messages.create(
         model=config.NEGOTIATOR_MODEL,
         max_tokens=1024,

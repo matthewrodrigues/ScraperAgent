@@ -22,6 +22,7 @@ from apify_client import ApifyClient
 
 import config
 from agents.criteria_parser import ParsedCriteria
+from integrations import clients
 
 
 log = logging.getLogger(__name__)
@@ -47,7 +48,7 @@ def _get_client() -> ApifyClient:
     if _client is None:
         if not config.APIFY_TOKEN:
             raise PricingSourceError("APIFY_TOKEN is not set in .env")
-        _client = ApifyClient(config.APIFY_TOKEN)
+        _client = ApifyClient(**clients.apify_kwargs())
     return _client
 
 
