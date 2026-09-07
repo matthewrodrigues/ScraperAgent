@@ -350,6 +350,75 @@ Two things that do **not** change for this setup: the app stays a single process
 (SQLite plus an in-process poller, so no horizontal scaling), and nothing needs
 containerizing.
 
+## Key broker
+
+Both API keys in this app cost money per call. If a friend wants to run their
+own copy — their own eBay account, their own dashboard, their own negotiations
+— the simplest thing is *not* to hand them your `ANTHROPIC_API_KEY` and
+`APIFY_TOKEN` outright. The key broker is a small reverse proxy that lets a
+friend's full copy of ScraperAgent reach Anthropic and Apify through your keys
+instead, under a token you issue and can revoke, with a monthly spend cap on
+both the friend and the broker as a whole.
+
+**Running it.** On your machine (the one holding the real keys):
+
+```
+python -m keybroker
+```
+
+It binds `127.0.0.1:8001` only — never all interfaces, since exposing it is a
+separate, deliberate step. To make it reachable from a friend's machine, put it
+behind Tailscale Funnel:
+
+```
+tailscale funnel 8001
+```
+
+Give the resulting URL to your friend as `SCRAPERAGENT_BROKER_URL` in their
+`.env` (see `.env.example`), and the token from the next step as
+`SCRAPERAGENT_BROKER_TOKEN`. With both set, their copy of the app sends
+Anthropic and Apify traffic to your broker instead of the vendors directly;
+with both empty (the default), it talks to the vendors with its own keys as
+usual.
+
+**Issuing and revoking tokens:**
+
+```
+python -m scripts.add_friend alice --budget 7.50
+python -m scripts.revoke_friend alice
+```
+
+`add_friend` prints the token once and stores only its SHA-256 — if it's lost,
+revoke and reissue rather than trying to recover it. `revoke_friend` sets a
+`revoked_at` timestamp rather than deleting the row, so past spend stays in the
+report for your own accounting.
+
+**Reading the spend report:**
+
+```
+python -m scripts.spend_report
+python -m scripts.spend_report --month 2026-08
+```
+
+Lists each friend's month-to-date spend against their budget, plus a global
+total against `BROKER_GLOBAL_MONTHLY_BUDGET_USD`.
+
+**The two caps.** Every friend has a `--budget` (default $5.00/month); once
+they hit it, the broker starts rejecting their requests until the calendar
+month turns over. There is also one global cap,
+`BROKER_GLOBAL_MONTHLY_BUDGET_USD` (default $25.00), that applies across all
+friends combined — a backstop against several friends each staying under their
+own budget while your total bill still runs away.
+
+**Two things worth knowing before you turn this on.** First, a friend's
+prompts and API responses pass through your machine's memory on their way to
+Anthropic and Apify — the broker is a proxy, not an escrow service, and it does
+not shield that traffic from a process running on your host. Second, the
+broker only governs traffic your friend's copy chooses to send it: nothing
+stops them from setting their own `ANTHROPIC_API_KEY` or `APIFY_TOKEN` in their
+own `.env` and bypassing you entirely. The broker is a convenience and a cost
+control for a friend acting in good faith, not a security boundary.
+
 ## Technology
 
 - Orchestration: LangGraph (`Send` API for fan-out, durable SQLite checkpointing)
