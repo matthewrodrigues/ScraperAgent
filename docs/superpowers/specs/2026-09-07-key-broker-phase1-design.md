@@ -266,35 +266,44 @@ a departed friend.
 
 ## 10. Client changes
 
-A new `integrations/clients.py` becomes the single place vendor clients are
-constructed:
+A new `integrations/clients.py` becomes the single place vendor credentials are
+resolved. It returns **constructor keyword arguments, not constructed clients**:
 
 ```python
-def anthropic_client() -> Anthropic:
+def anthropic_kwargs() -> dict[str, Any]:
     if config.BROKER_URL:
-        return Anthropic(api_key=config.BROKER_TOKEN,
-                         base_url=f"{config.BROKER_URL}/anthropic")
-    return Anthropic(api_key=config.ANTHROPIC_API_KEY)
+        return {"api_key": config.BROKER_TOKEN,
+                "base_url": f"{config.BROKER_URL}/anthropic"}
+    return {"api_key": config.ANTHROPIC_API_KEY}
 
 
-def apify_client() -> ApifyClient:
+def apify_kwargs() -> dict[str, Any]:
     if config.BROKER_URL:
-        return ApifyClient(config.BROKER_TOKEN,
-                           api_url=f"{config.BROKER_URL}/apify")
-    return ApifyClient(config.APIFY_TOKEN)
+        return {"token": config.BROKER_TOKEN,
+                "api_url": f"{config.BROKER_URL}/apify"}
+    return {"token": config.APIFY_TOKEN}
 ```
 
-Three call sites switch to the factory:
+Three call sites keep constructing their own client, but source the arguments
+from the factory:
 
 | File | Line | Change |
 |---|---|---|
-| `agents/criteria_parser.py` | 100 | `Anthropic(...)` -> `clients.anthropic_client()` |
-| `agents/negotiate.py` | 134 | `Anthropic(...)` -> `clients.anthropic_client()` |
-| `pricing/google_shopping.py` | 50 | `ApifyClient(...)` -> `clients.apify_client()` |
+| `agents/criteria_parser.py` | 100 | `Anthropic(api_key=...)` -> `Anthropic(**clients.anthropic_kwargs())` |
+| `agents/negotiate.py` | 134 | `Anthropic(api_key=...)` -> `Anthropic(**clients.anthropic_kwargs())` |
+| `pricing/google_shopping.py` | 50 | `ApifyClient(config.APIFY_TOKEN)` -> `ApifyClient(**clients.apify_kwargs())` |
 
-`pricing/google_shopping.py` keeps its module-level client cache; only
-construction moves. `api_public_url` stays at its default — it builds shareable
-links, not authenticated calls.
+**Why kwargs rather than clients.** The existing suite patches the SDK classes
+where they are used — `agents.negotiate.Anthropic`,
+`agents.criteria_parser.Anthropic`, `pricing.google_shopping.ApifyClient` — at
+roughly twenty sites. Returning constructed clients would move construction out
+of those modules and break every one of those patches. Returning kwargs leaves
+each module's `Anthropic(...)` / `ApifyClient(...)` call in place, so all
+existing tests keep passing untouched, which is what goal 4 requires.
+
+`pricing/google_shopping.py` keeps its module-level client cache; only the
+argument source moves. `api_public_url` stays at its default — it builds
+shareable links, not authenticated calls.
 
 The `if config.BROKER_URL` branch is the escape hatch: unset means direct vendor
 calls with local keys, so the owner's machine is unaffected and any friend can
@@ -359,9 +368,9 @@ friend under their own budget; the month boundary excludes prior-month spend.
 
 **Fail closed** — unset broker vendor key returns 503 on every proxied route.
 
-**Client factory** — with `BROKER_URL` set, clients carry the broker base URL
-and token; unset, they carry the real keys and vendor URLs; URL-without-token
-raises at startup.
+**Client factory** — with `BROKER_URL` set, `anthropic_kwargs()` and
+`apify_kwargs()` return the broker base URL and broker token; unset, they return
+the real keys with no URL override; a URL set without a token raises at startup.
 
 The existing 281 tests must continue to pass unchanged, which also serves as the
 regression check on goal 4.
