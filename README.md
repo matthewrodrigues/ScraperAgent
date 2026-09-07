@@ -434,6 +434,16 @@ uses — `/v1/messages` and `/v1/messages/count_tokens`. Anything else on the
 Anthropic side gets a 404, because paths like the Batches API slip past the
 per-request clamps and the spend meter.
 
+On the Apify side, the broker forwards any path but only `GET` and `POST` —
+the only methods this app ever issues (run creation, run-status polling,
+dataset item fetches). `PUT`, `PATCH`, and `DELETE` get a plain 405, closing
+off Apify's destructive management calls (deleting actors, tasks, schedules,
+webhooks) under your token. There's no path allowlist here the way there is
+for Anthropic: the Apify SDK's `.call()` can reach endpoints this codebase
+doesn't enumerate, so an allowlist risks silently breaking a friend's search.
+Method restriction doesn't have that risk, since this app never sends anything
+but `GET`/`POST` to Apify.
+
 **Two things worth knowing before you turn this on.** First, a friend's
 prompts and API responses pass through your machine's memory on their way to
 Anthropic and Apify — the broker is a proxy, not an escrow service, and it does

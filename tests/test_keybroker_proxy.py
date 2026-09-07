@@ -109,6 +109,16 @@ def test_apify_uses_bearer_and_its_own_upstream(broker, monkeypatch):
     assert call["headers"]["authorization"] == "Bearer apify-owner-token"
 
 
+@pytest.mark.parametrize("method", ["DELETE", "PUT", "PATCH"])
+def test_apify_management_methods_are_refused(broker, monkeypatch, method):
+    client, token = broker
+    fake = _install(monkeypatch, httpx.Response(200, json={}))
+    r = client.request(method, "/apify/v2/acts/some-actor",
+                        headers={"authorization": f"Bearer {token}"})
+    assert r.status_code == 405
+    assert fake.calls == []
+
+
 def test_successful_call_is_metered(broker, monkeypatch):
     client, token = broker
     _install(monkeypatch, _anthropic_response(input_tokens=1000, output_tokens=500))

@@ -116,7 +116,19 @@ Path suffixes map straight through: the Anthropic SDK requests
 `{base_url}/v1/messages`, the Apify SDK `{api_url}/v2/acts/...`. All other
 headers forward unchanged, including `anthropic-version`. `/anthropic/*` is
 restricted to an allowlist of the two paths this app uses (see §6); `/apify/*`
-stays open, since Apify's spending endpoints are clamped pre-spend.
+is instead restricted to the HTTP methods this app actually issues — `GET`
+(run-status polling, dataset item fetches) and `POST` (run creation). A path
+allowlist was considered for `/apify/*` too and rejected: the Apify SDK's
+`.call()` spans run creation, run-status polling, and dataset fetches, and may
+reach endpoints not enumerated in this codebase, so an allowlist risks
+silently breaking a friend's search. Method restriction carries no such risk —
+this app never issues `PUT`/`PATCH`/`DELETE` to Apify — and it closes the
+actual hole: those verbs are how an authenticated friend would reach
+destructive Apify management calls (deleting actors, tasks, schedules,
+webhooks) under the owner's token. Spend itself is still bounded pre-spend by
+the clamp described above; the method restriction is about data access and
+destructive operations, not budget. FastAPI refuses the other methods with a
+plain `405` before `_proxy` runs.
 
 The incoming credential is **stripped and never forwarded** — a friend's token
 identifies them to the broker and has no meaning upstream.

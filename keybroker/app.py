@@ -183,7 +183,15 @@ async def proxy_anthropic(path: str, request: Request) -> Response:
     return await _proxy("anthropic", path, request)
 
 
-@app.api_route("/apify/{path:path}",
-               methods=["GET", "POST", "PUT", "PATCH", "DELETE"])
+# Only GET (run-status polling, dataset item fetches) and POST (run creation)
+# are ever issued by this app. PUT/PATCH/DELETE would let an authenticated
+# friend reach destructive Apify management calls (deleting actors, tasks,
+# schedules, webhooks) under the owner's token. A path allowlist (as used for
+# /anthropic/*) was rejected here: the Apify SDK's .call() spans run creation,
+# run-status polling, and dataset fetches, and may hit endpoints not enumerated
+# in our code, so an allowlist risks silently breaking a friend's search.
+# Narrowing methods= is enough to close the hole and cannot break anything the
+# app does; FastAPI refuses other methods with 405 before _proxy ever runs.
+@app.api_route("/apify/{path:path}", methods=["GET", "POST"])
 async def proxy_apify(path: str, request: Request) -> Response:
     return await _proxy("apify", path, request)
