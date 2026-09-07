@@ -408,7 +408,19 @@ they hit it, the broker starts rejecting their requests until the calendar
 month turns over. There is also one global cap,
 `BROKER_GLOBAL_MONTHLY_BUDGET_USD` (default $25.00), that applies across all
 friends combined — a backstop against several friends each staying under their
-own budget while your total bill still runs away.
+own budget while your total bill still runs away. The broker reserves the cost
+of one worst-case call before allowing a request, so the last permitted call
+lands at or under the budget; requests already in flight are not reserved
+against each other, so a burst of concurrent calls can overshoot by roughly that
+reservation per call in flight.
+
+**What the broker will forward.** Only the two Anthropic endpoints this app
+uses — `/v1/messages` and `/v1/messages/count_tokens` — anything else on the
+Anthropic side gets a 404, because paths like the Batches API slip past the
+per-request clamps and the spend meter. The model named in a request must also
+be one the broker knows how to price (`config.MODEL_PRICING`); an unknown model
+is refused with a 400 rather than being billed to you and metered at zero. If a
+friend's copy is pinned to a newer model, add it to `MODEL_PRICING` first.
 
 **Two things worth knowing before you turn this on.** First, a friend's
 prompts and API responses pass through your machine's memory on their way to

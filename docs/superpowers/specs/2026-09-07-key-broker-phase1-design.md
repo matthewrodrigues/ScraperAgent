@@ -114,7 +114,9 @@ one middleware.
 
 Path suffixes map straight through: the Anthropic SDK requests
 `{base_url}/v1/messages`, the Apify SDK `{api_url}/v2/acts/...`. All other
-headers forward unchanged, including `anthropic-version`.
+headers forward unchanged, including `anthropic-version`. `/anthropic/*` is
+restricted to an allowlist of the two paths this app uses (see §6); `/apify/*`
+stays open, since Apify's spending endpoints are clamped pre-spend.
 
 The incoming credential is **stripped and never forwarded** — a friend's token
 identifies them to the broker and has no meaning upstream.
@@ -151,16 +153,35 @@ the client runs on someone else's machine and its values cannot be trusted.
 3. **`max_total_charge_usd` clamp (Apify run creation only).** Rewritten down to
    the friend's remaining budget. Apify is the only vendor exposing a pre-spend
    ceiling, so this is the one place spend is capped before it happens rather
-   than measured after.
+   than measured after. The ceiling is a **query parameter**, not a body field
+   (the Apify SDK folds it into `request_params`; the POST body is the actor's
+   input record), so the broker rewrites the query string and leaves the body
+   untouched. Run creation covers `POST /v2/acts/{id}/runs`, the `run-sync` and
+   `run-sync-get-dataset-items` variants, and `POST /v2/actor-tasks/{id}/runs`.
+
+Two further refusals bound what can be reached at all:
+
+- **Anthropic path allowlist.** Only `/v1/messages` and `/v1/messages/count_tokens`
+  are proxied; anything else on `/anthropic/*` gets 404. `/v1/messages/batches`
+  in particular nests `max_tokens` under `requests[].params` (invisible to
+  clamp 1) and returns no `usage` (invisible to metering).
+- **Unpriced models get 400.** `config.price_usage()` returns 0.0 for a model
+  absent from `config.MODEL_PRICING`, which would meter real spend at zero and
+  leave both caps in section 8 inert. The model named in the body must be a key
+  of that table.
 
 **Streaming is rejected with 400.** Nothing in the app streams, and a proxy that
 partially handles SSE would under-meter silently. Detected by `"stream": true`
 in the request body.
 
 Together, clamps 1 and 2 make the worst-case single Anthropic call
-deterministic: 4096 output tokens at Sonnet 4.6's $15/MTok is $0.061, plus
-~64k input tokens at $3/MTok is $0.192 — about **$0.25**. This is the basis for
-the headroom constant in §8.
+deterministic. 4096 output tokens at Sonnet 4.6's $15/MTok is $0.061. The input
+term depends on how densely the friend's content packs into tokens: at ~4
+bytes/token (English ASCII) a 256 KiB body is ~65.5k tokens at $3/MTok, or
+$0.197, totalling **$0.26**; at ~3 bytes/token (JSON-escaped or CJK text) it is
+~87.4k tokens, or $0.262, totalling **$0.32**. The friend chooses the content,
+so the dense case is the one that counts. This is the basis for the headroom
+constant in §8.
 
 ## 7. Metering
 
@@ -212,11 +233,18 @@ than comparing against raw spend:
 if spent_this_month + BROKER_MAX_SINGLE_CALL_USD > budget:  reject
 ```
 
-with `BROKER_MAX_SINGLE_CALL_USD = 0.30` (the $0.25 from §6, rounded up). This
-makes overspend impossible by construction: the final permitted call lands at or
-under the budget, so the owner sets the budget to the true ceiling and the
-broker does the subtraction. Apify contributes no overshoot at all, since it is
-clamped pre-spend.
+with `BROKER_MAX_SINGLE_CALL_USD = 0.40` (the $0.32 worst case from §6, rounded
+up). The final permitted call therefore lands at or under the budget, so the
+owner sets the budget to the true ceiling and the broker does the subtraction.
+Apify contributes no overshoot at all, since it is clamped pre-spend.
+
+**The reservation covers one call per request in flight.** The check and the
+metering write are separate transactions, so N concurrent requests all read the
+same month-to-date spend and all pass; the bound is N x
+`BROKER_MAX_SINGLE_CALL_USD` over budget, not one call. Closing that would take
+a reservation row written before forwarding and reconciled after — deliberately
+not built (see §15), as disproportionate for a handful of friends who are
+already trusted socially.
 
 **Rejections return 402, never 429.** The Anthropic SDK retries 429 twice by
 default and the Apify SDK four times; a quota rejection sent as 429 would be
@@ -332,7 +360,9 @@ pricing table and should change deliberately with it.
 | Missing / unknown / revoked token | 401 | No detail, no redirect; logged with client address |
 | Broker's own vendor key unset | 503 | Fail closed, mirroring `api/auth.py` |
 | Per-friend or global budget exhausted | 402 | Outside both SDKs' retry sets |
-| Request body over 256 KB | 413 | |
+| Request body over 256 KB | 413 | `Content-Length` checked before the body is read; re-checked after |
+| Anthropic path outside the allowlist | 404 | e.g. `/v1/messages/batches`, which evades the clamp and the meter |
+| Model absent from `config.MODEL_PRICING` | 400 | Would meter at $0.00 and leave both caps inert |
 | `"stream": true` | 400 | Explicit, not silent under-metering |
 | Upstream 4xx/5xx | forwarded verbatim | Client SDK's own retry logic applies |
 | Upstream timeout / connection error | 502 | |
@@ -402,8 +432,13 @@ restarting one does not interrupt the other.
   deliberately. The global cap bounds total damage; nothing else is enforced.
 - **Apify metering depends on response shape.** If Apify renames
   `usageTotalUsd`, metering silently records nothing. Mitigated by the pre-spend
-  `max_total_charge_usd` clamp, which does not depend on parsing.
-- **Overspend within one call is bounded, not eliminated.** Metering happens
-  after the response arrives, so the headroom reservation in §8 is what makes
-  the budget a hard ceiling. If the clamps in §6 are weakened, the reservation
-  constant must be recomputed with them.
+  `max_total_charge_usd` query-parameter clamp, which does not depend on parsing
+  the response.
+- **Overspend is bounded, not eliminated.** Metering happens after the response
+  arrives, so the headroom reservation in §8 is what keeps the budget close to a
+  ceiling — but it reserves for one call, and the quota check and the metering
+  write are separate transactions. With N requests in flight concurrently the
+  budget can be exceeded by up to N x `BROKER_MAX_SINGLE_CALL_USD`. Accepted:
+  the fix is reservation rows plus reconciliation, which is disproportionate at
+  this scale, and the global cap still bounds the total. If the clamps in §6 are
+  weakened, the reservation constant must be recomputed with them.

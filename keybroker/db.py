@@ -8,7 +8,7 @@ written by SQLite's datetime('now'), cost_usd REAL, cascading FKs.
 """
 
 import sqlite3
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from datetime import datetime, timezone
 from typing import Any, Iterator
 
@@ -52,8 +52,10 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_spend_upstream
 
 
 def init_db() -> None:
-    with sqlite3.connect(config.BROKER_DB_PATH) as conn:
-        conn.executescript(SCHEMA)
+    # sqlite3's own context manager commits, it does not close — hence closing().
+    with closing(sqlite3.connect(config.BROKER_DB_PATH)) as conn:
+        with conn:
+            conn.executescript(SCHEMA)
 
 
 @contextmanager

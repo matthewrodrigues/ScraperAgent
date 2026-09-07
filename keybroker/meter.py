@@ -36,6 +36,10 @@ def record_anthropic(friend_id: int, body: bytes) -> None:
         return  # error responses carry no usage
 
     model = payload.get("model", "")
+    # Cache token counts are stored but NOT priced: config.price_usage() takes
+    # only input/output. Both are zero today because nothing enables prompt
+    # caching; if that changes, cache-creation tokens (billed at 1.25x input)
+    # will under-meter until price_usage() learns about them.
     input_tokens = int(usage.get("input_tokens", 0))
     output_tokens = int(usage.get("output_tokens", 0))
     try:
