@@ -777,11 +777,19 @@ def test_friend_within_one_call_of_budget_is_rejected(broker_db):
     assert "alice" in excinfo.value.detail
 
 
-def test_headroom_boundary_is_exact(broker_db):
-    """At budget - MAX_SINGLE_CALL_USD exactly, the next call must be refused:
-    permitting it could land exactly on the budget, not under it."""
+def test_just_inside_the_headroom_passes(broker_db):
+    """Spec section 8 permits the last call to land at or under the budget, so
+    anything with more than MAX_SINGLE_CALL_USD of room must be allowed.
+    Margins avoid asserting on exact float equality at the boundary."""
     friend = _friend(budget=5.0)
-    db.record_spend(friend["id"], "anthropic", 5.0 - quota.MAX_SINGLE_CALL_USD,
+    db.record_spend(friend["id"], "anthropic", 5.0 - quota.MAX_SINGLE_CALL_USD - 0.01,
+                    upstream_ref="m1")
+    quota.check(friend)
+
+
+def test_just_past_the_headroom_is_refused(broker_db):
+    friend = _friend(budget=5.0)
+    db.record_spend(friend["id"], "anthropic", 5.0 - quota.MAX_SINGLE_CALL_USD + 0.01,
                     upstream_ref="m1")
     with pytest.raises(quota.QuotaExceeded):
         quota.check(friend)
@@ -875,7 +883,7 @@ def check(friend: dict[str, Any]) -> None:
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `.venv/Scripts/python.exe -m pytest tests/test_keybroker_quota.py -v`
-Expected: PASS (7 tests)
+Expected: PASS (8 tests)
 
 - [ ] **Step 5: Commit**
 
@@ -1558,11 +1566,16 @@ async def lifespan(app: FastAPI):
     db.init_db()
     # Ten minutes matches the Anthropic SDK default, so the broker never times
     # out before the client it is serving does.
-    _client = httpx.AsyncClient(timeout=httpx.Timeout(600.0))
+    #
+    # Close the local reference, not the module global: tests swap the global
+    # for a stub, and shutdown must close the client this function actually
+    # opened rather than whatever the global happens to hold.
+    client = httpx.AsyncClient(timeout=httpx.Timeout(600.0))
+    _client = client
     try:
         yield
     finally:
-        await _client.aclose()
+        await client.aclose()
         _client = None
 
 
@@ -1688,7 +1701,7 @@ Expected: PASS (16 tests)
 - [ ] **Step 5: Run the full suite**
 
 Run: `.venv/Scripts/python.exe -m pytest -q`
-Expected: PASS — 354 tests (281 original + 73 added across Tasks 1-7)
+Expected: PASS — 355 tests (281 original + 74 added across Tasks 1-7)
 
 - [ ] **Step 6: Commit**
 
@@ -1962,7 +1975,7 @@ Add a "Key broker" section to `README.md` after "Deployment" covering: what it i
 - [ ] **Step 8: Run the full suite**
 
 Run: `.venv/Scripts/python.exe -m pytest -q`
-Expected: PASS — 361 tests (281 original + 80 added)
+Expected: PASS — 362 tests (281 original + 81 added)
 
 - [ ] **Step 9: Commit**
 
@@ -1977,7 +1990,7 @@ git commit -m "feat(broker): operator scripts and documentation"
 
 After Task 8, confirm the spec's success criteria hold:
 
-- [ ] `.venv/Scripts/python.exe -m pytest -q` — 361 passing, including the original 281 unchanged.
+- [ ] `.venv/Scripts/python.exe -m pytest -q` — 362 passing, including the original 281 unchanged.
 - [ ] With `SCRAPERAGENT_BROKER_URL` empty, `python -c "from integrations import clients; print(clients.anthropic_kwargs())"` shows the real key and no `base_url`.
 - [ ] `python -m scripts.add_friend testuser --budget 1` prints a token; `python -m scripts.spend_report` lists them at $0.00.
 - [ ] `python -m keybroker` starts and `curl http://127.0.0.1:8001/health` returns `{"status":"ok"}`.
