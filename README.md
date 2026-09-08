@@ -109,8 +109,10 @@ never computes the offer amount — that is clamped in code to never exceed
 - **Output validation (Pydantic):** every negotiator output is validated before
   it reaches eBay — offer <= `max_price`, message sanity checks, and
   reference-price claims must match the actual reference-price object.
-- **Cost guards:** Apify spend per search is capped (default $0.50) with a
-  pre-flight estimate that aborts an actor before launch if it would breach.
+- **Cost guards:** Apify spend per search is capped at `APIFY_BUDGET_USD`
+  (default $0.90, covering listing discovery plus reference pricing). The cap is
+  enforced by the vendor, not just estimated: each run is launched with a ceiling
+  of whatever remains of the search's budget, so a search cannot spend past it.
   Actual spend is tracked from each run's reported usage.
 
 ## Dashboard authentication
