@@ -45,6 +45,12 @@ _COLUMN_MIGRATIONS: list[tuple[str, str, str]] = [
     ("messages", "input_tokens", "INTEGER"),
     ("messages", "output_tokens", "INTEGER"),
     ("messages", "cost_usd", "REAL"),
+    # Discovery moved from the free Browse API to a paid Apify actor, so a
+    # search now has a cost of its own that is not a reference price.
+    ("searches", "search_cost_usd", "REAL NOT NULL DEFAULT 0"),
+    # Non-fatal degradation notice shown as a banner. Distinct from
+    # error_message, which means the search failed.
+    ("searches", "warning_message", "TEXT"),
 ]
 
 
@@ -114,6 +120,25 @@ def set_search_error(search_id: int, error_message: str) -> None:
         conn.execute(
             "UPDATE searches SET error_message = ? WHERE id = ?",
             (error_message, search_id),
+        )
+
+
+def set_search_cost(search_id: int, cost_usd: float) -> None:
+    """Record what discovery cost for this search."""
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE searches SET search_cost_usd = ? WHERE id = ?",
+            (round(cost_usd, 6), search_id),
+        )
+
+
+def set_search_warning(search_id: int, message: str) -> None:
+    """Attach a non-fatal notice to a search. Rendered as a banner; unlike
+    error_message it does not mean the search failed."""
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE searches SET warning_message = ? WHERE id = ?",
+            (message, search_id),
         )
 
 
@@ -256,6 +281,15 @@ def list_reference_prices(search_id: int) -> list[dict[str, Any]]:
         return out
 
 
+def sum_search_cost(search_id: int) -> float:
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT COALESCE(search_cost_usd, 0.0) AS c FROM searches WHERE id = ?",
+            (search_id,),
+        ).fetchone()
+        return float(row["c"]) if row else 0.0
+
+
 def sum_apify_cost(search_id: int) -> float:
     """Sum of cost_usd across all reference_prices rows for a search.
     Used by the cost guard to enforce APIFY_BUDGET_USD."""
@@ -289,16 +323,19 @@ def sum_claude_cost(search_id: int) -> float:
 
 
 def sum_total_cost(search_id: int) -> dict[str, float]:
-    """Combined cost breakdown for a search: Apify scraping + Claude drafting.
+    """Cost breakdown for a search: discovery + Apify pricing + Claude drafting.
 
-    Returns `{"apify": A, "claude": C, "total": A+C}` with each value rounded
-    to 4 decimals — enough precision to capture Haiku-sized increments while
-    keeping the template's $0.XX rendering clean.
-
-    Single source of truth for the dashboard cost-summary line."""
+    Returns `{"search": S, "apify": A, "claude": C, "total": S+A+C}` rounded to
+    4 decimals. Single source of truth for the dashboard cost line."""
+    search = round(sum_search_cost(search_id), 4)
     apify = round(sum_apify_cost(search_id), 4)
     claude = round(sum_claude_cost(search_id), 4)
-    return {"apify": apify, "claude": claude, "total": round(apify + claude, 4)}
+    return {
+        "search": search,
+        "apify": apify,
+        "claude": claude,
+        "total": round(search + apify + claude, 4),
+    }
 
 
 def get_aggregated_ref_median(search_id: int) -> float | None:

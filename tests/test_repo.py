@@ -4,6 +4,7 @@ import sqlite3
 
 import pytest
 
+import config
 from db import repo
 
 
@@ -418,10 +419,73 @@ def test_sum_total_cost_shape_and_arithmetic(tmp_db):
     repo.add_message(nid, "agent", "long enough body to clear validator", 80.0, cost_usd=0.0123)
 
     costs = repo.sum_total_cost(search_id)
-    assert set(costs.keys()) == {"apify", "claude", "total"}
+    assert set(costs.keys()) == {"search", "apify", "claude", "total"}
+    assert costs["search"] == pytest.approx(0.0)
     assert costs["apify"] == pytest.approx(0.07)
     assert costs["claude"] == pytest.approx(0.0123)
     assert costs["total"] == pytest.approx(0.07 + 0.0123)
+
+
+def test_set_search_cost_and_read_back(tmp_db):
+    search_id = repo.create_search("headphones", {"title_keywords": "headphones"}, 250.0)
+    repo.set_search_cost(search_id, 0.0512)
+    assert repo.get_search(search_id)["search_cost_usd"] == pytest.approx(0.0512)
+
+
+def test_search_cost_defaults_to_zero(tmp_db):
+    search_id = repo.create_search("headphones", {"title_keywords": "headphones"}, 250.0)
+    assert repo.get_search(search_id)["search_cost_usd"] == 0.0
+
+
+def test_set_search_warning_and_read_back(tmp_db):
+    search_id = repo.create_search("headphones", {"title_keywords": "headphones"}, 250.0)
+    repo.set_search_warning(search_id, "Seller feedback unavailable.")
+    assert repo.get_search(search_id)["warning_message"] == "Seller feedback unavailable."
+
+
+def test_warning_message_defaults_to_none(tmp_db):
+    search_id = repo.create_search("headphones", {"title_keywords": "headphones"}, 250.0)
+    assert repo.get_search(search_id)["warning_message"] is None
+
+
+def test_migration_adds_columns_to_a_preexisting_database(tmp_path, monkeypatch):
+    """The tmp_db fixture builds a fresh schema, so it never exercises the
+    ALTER TABLE path. A real user's broker.db predates these columns."""
+    import sqlite3
+    db_path = tmp_path / "legacy.db"
+    monkeypatch.setattr(config, "DB_PATH", db_path)
+    conn = sqlite3.connect(db_path)
+    conn.executescript(
+        "CREATE TABLE searches ("
+        " id INTEGER PRIMARY KEY AUTOINCREMENT,"
+        " criteria_nl TEXT NOT NULL,"
+        " criteria_structured_json TEXT NOT NULL,"
+        " max_price REAL NOT NULL,"
+        " status TEXT NOT NULL DEFAULT 'pending',"
+        " created_at TEXT NOT NULL DEFAULT (datetime('now')))"
+    )
+    conn.commit()
+    conn.close()
+
+    repo.init_db()
+
+    with repo.get_conn() as conn:
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(searches)").fetchall()}
+    assert "search_cost_usd" in cols
+    assert "warning_message" in cols
+
+
+def test_sum_total_cost_includes_search_cost(tmp_db):
+    search_id = repo.create_search("headphones", {"title_keywords": "headphones"}, 250.0)
+    repo.set_search_cost(search_id, 0.05)
+    repo.add_reference_price(
+        search_id, source="google_shopping", raw_data={}, median=100.0,
+        p25=90.0, p75=110.0, condition="used", cost_usd=0.49,
+    )
+    totals = repo.sum_total_cost(search_id)
+    assert totals["search"] == pytest.approx(0.05)
+    assert totals["apify"] == pytest.approx(0.49)
+    assert totals["total"] == pytest.approx(0.54)
 
 
 # ---- Reference-price aggregation for listing ranking ----

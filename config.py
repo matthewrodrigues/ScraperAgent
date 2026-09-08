@@ -63,7 +63,14 @@ EBAY_DELETION_VERIFICATION_TOKEN = os.getenv("EBAY_DELETION_VERIFICATION_TOKEN",
 
 # Apify
 APIFY_TOKEN = os.getenv("APIFY_TOKEN")
-APIFY_BUDGET_USD = float(os.getenv("APIFY_BUDGET_USD", "0.50"))
+APIFY_BUDGET_USD = float(os.getenv("APIFY_BUDGET_USD", "0.90"))
+
+# Discovery's own ceiling, deliberately separate from APIFY_BUDGET_USD above.
+# 25 results at $0.002 is ~$0.05; 0.15 leaves 3x headroom. It must not reuse the
+# reference-pricing budget: the key broker debits a friend the *declared*
+# ceiling provisionally, so an over-declared ceiling is a real charge against
+# their monthly budget until reconciliation settles it.
+EBAY_SEARCH_BUDGET_USD = float(os.getenv("EBAY_SEARCH_BUDGET_USD", "0.15"))
 
 # Gmail (OAuth client ID/secret from Google Cloud Console; refresh token stored on first consent)
 GMAIL_CLIENT_SECRETS_PATH = os.getenv("GMAIL_CLIENT_SECRETS_PATH", "./secrets/gmail_client_secret.json")
