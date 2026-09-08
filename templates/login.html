@@ -1,0 +1,21 @@
+{% extends "base.html" %}
+{% block title %}Sign in — ScraperAgent{% endblock %}
+{% block content %}
+<section class="login">
+    <h1>Sign in</h1>
+    <p class="login-hint">This dashboard spends money and acts on your eBay account.</p>
+
+    {% if error %}
+    <p class="login-error" role="alert">{{ error }}</p>
+    {% endif %}
+
+    <form action="/login" method="post" class="login-form">
+        <input type="hidden" name="next" value="{{ next }}">
+        <label>
+            Password
+            <input type="password" name="password" autocomplete="current-password" autofocus required>
+        </label>
+        <button type="submit">Sign in</button>
+    </form>
+</section>
+{% endblock %}

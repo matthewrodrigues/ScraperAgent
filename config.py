@@ -6,34 +6,53 @@ the module that uses them.
 """
 
 import logging
-from dotenv import load_dotenv
 import os
+import secrets
+import sys
 from pathlib import Path
 
-import pip_system_certs.wrapt_requests  # noqa: F401  patches `requests` to use Windows cert store
-
+from dotenv import load_dotenv
 
 log = logging.getLogger(__name__)
 
-# `pip_system_certs` only patches `requests`. The Anthropic SDK and apify-client
-# both use `httpx` instead, which has its own SSL context — so Norton's HTTPS
-# interception breaks them. `truststore` patches the stdlib ssl module to read
-# the OS trust store (where Norton's MITM cert lives), which fixes httpx and
-# anything else that uses `ssl.create_default_context()`.
-import truststore
-truststore.inject_into_ssl()
+# ---- Windows HTTPS interception workaround ----
+# Norton (and other Windows AV) man-in-the-middles HTTPS with a locally-trusted
+# root cert, which breaks any client that ships its own CA bundle:
+#
+#   * `pip_system_certs` patches `requests` to use the Windows cert store.
+#   * `truststore` patches the stdlib ssl module, which fixes `httpx` — used by
+#     the Anthropic SDK and apify-client, neither of which `pip_system_certs`
+#     touches.
+#
+# Guarded to win32 so Linux (CI, and any future container) neither needs these
+# packages installed nor inherits a workaround for a problem it doesn't have.
+if sys.platform == "win32":  # pragma: no cover - platform-specific bootstrap
+    import pip_system_certs.wrapt_requests  # noqa: F401
+    import truststore
+
+    truststore.inject_into_ssl()
 
 load_dotenv()
 
 # ---- API keys / secrets ----
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
 
-# eBay developer keys + user OAuth token (user confirmed all four are present)
+# eBay credentials. Two independent auth paths, deliberately not unified:
+#
+#   * APP_ID + CERT_ID authorize the Browse API (listing search) through a
+#     client-credentials token that `browser/ebay.py` fetches and refreshes on
+#     its own. No user, no consent screen, nothing to store.
+#   * USER_TOKEN is a legacy Auth'n'Auth token (valid ~18 months) for the
+#     Trading API calls the seller-reply poller makes. There is no refresh
+#     token to manage: Auth'n'Auth tokens aren't refreshed, they're regenerated
+#     from eBay's developer portal when they expire.
+#
+# Buyer-side actions (Best Offer, seller messaging) use neither — they go
+# through the Playwright browser session. See `integrations/ebay_browser.py`.
 EBAY_APP_ID = os.getenv("EBAY_APP_ID")
 EBAY_CERT_ID = os.getenv("EBAY_CERT_ID")
 EBAY_DEV_ID = os.getenv("EBAY_DEV_ID")
 EBAY_USER_TOKEN = os.getenv("EBAY_USER_TOKEN")
-EBAY_OAUTH_REFRESH_TOKEN = os.getenv("EBAY_OAUTH_REFRESH_TOKEN")
 EBAY_ENV = os.getenv("EBAY_ENV", "production")  # or "sandbox"
 
 # Marketplace Account Deletion notification — required for eBay production keysets.
@@ -50,6 +69,27 @@ APIFY_BUDGET_USD = float(os.getenv("APIFY_BUDGET_USD", "0.50"))
 GMAIL_CLIENT_SECRETS_PATH = os.getenv("GMAIL_CLIENT_SECRETS_PATH", "./secrets/gmail_client_secret.json")
 GMAIL_TOKEN_PATH = os.getenv("GMAIL_TOKEN_PATH", "./secrets/gmail_token.json")
 GMAIL_SENDER = os.getenv("GMAIL_SENDER", "matthew.rodrigues@berkeley.edu")
+
+# ---- Dashboard authentication ----
+# The dashboard spends money (Anthropic, Apify) and drives a browser logged into
+# the owner's eBay account, so it is closed by default. In the deployed setup
+# Cloudflare Access is the outer gate and this is the inner one; keeping both
+# means a misconfigured tunnel degrades to "asks for a password" rather than
+# "wide open". An empty value locks the dashboard rather than opening it —
+# see `api/auth.py`.
+DASHBOARD_PASSWORD = os.getenv("DASHBOARD_PASSWORD", "")
+
+# Signs the session cookie. Set this in .env — generate one with:
+#   python -c "import secrets; print(secrets.token_hex(32))"
+# Falling back to a per-boot random value is safe but logs you out on every
+# restart, which is a deliberate nudge to configure it properly.
+SESSION_SECRET = os.getenv("SESSION_SECRET", "")
+if not SESSION_SECRET:
+    SESSION_SECRET = secrets.token_hex(32)
+    log.warning(
+        "SESSION_SECRET not set; generated an ephemeral one. Dashboard sessions "
+        "will not survive a restart. Set SESSION_SECRET in .env to fix."
+    )
 
 # ---- Tuning knobs ----
 MAX_PARALLEL_NEGOTIATIONS = int(os.getenv("MAX_PARALLEL_NEGOTIATIONS", "5"))
@@ -112,11 +152,34 @@ def price_usage(model: str, input_tokens: int, output_tokens: int) -> float:
     return round(cost, 6)
 
 # ---- Paths ----
+# Two categories, deliberately separated:
+#
+#   * Code paths (TEMPLATES_DIR, STATIC_DIR) are pinned to the repo and ship
+#     with the app. They must never move, or Jinja2 goes looking for templates
+#     on a data volume.
+#   * Data paths (DB_PATH, SECRETS_DIR) are env-overridable so the app can run
+#     with its state on a mounted volume or a backed-up directory without
+#     touching code. Defaults keep the historical repo-root layout, so an
+#     existing checkout needs no .env change.
+#
+# SCRAPERAGENT_DATA_DIR moves both data paths at once; the per-path vars
+# override it individually when only one needs to move.
 ROOT_DIR = Path(__file__).resolve().parent
-DB_PATH = ROOT_DIR / "scraperagent.db"
 TEMPLATES_DIR = ROOT_DIR / "templates"
 STATIC_DIR = ROOT_DIR / "static"
-SECRETS_DIR = ROOT_DIR / "secrets"
+
+DATA_DIR = Path(os.getenv("SCRAPERAGENT_DATA_DIR", str(ROOT_DIR)))
+DB_PATH = Path(os.getenv("SCRAPERAGENT_DB_PATH", str(DATA_DIR / "scraperagent.db")))
+SECRETS_DIR = Path(os.getenv("SCRAPERAGENT_SECRETS_DIR", str(DATA_DIR / "secrets")))
+
+# ---- Backups ----
+# The Chrome profile is the only unreproducible local state (see
+# `scripts/backup_profile.py`). Backups default outside the repo AND outside the
+# OneDrive-synced desktop path: the profile runs to hundreds of MB, and dropping
+# a fresh copy into a synced folder every week would push that up to the cloud
+# on every run.
+BACKUP_DIR = Path(os.getenv("SCRAPERAGENT_BACKUP_DIR", str(Path.home() / "ScraperAgentBackups")))
+BACKUP_KEEP = int(os.getenv("SCRAPERAGENT_BACKUP_KEEP", "5"))
 
 # ---- eBay browser automation (Option 2 — Playwright) ----
 # Persistent browser profile directory. We use `launch_persistent_context`

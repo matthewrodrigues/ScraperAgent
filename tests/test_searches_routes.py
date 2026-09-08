@@ -8,11 +8,23 @@ from fastapi.testclient import TestClient
 from agents.criteria_parser import ParsedCriteria
 from api.main import app
 from integrations.ebay_trading import EbayTradingError, NoPartnerRelationshipError
+from tests.conftest import TEST_DASHBOARD_PASSWORD
 
 
 @pytest.fixture
 def client(tmp_db):
-    return TestClient(app)
+    """A logged-in client.
+
+    Every route below is behind `RequireAuthMiddleware`, so the fixture signs in
+    once and lets TestClient carry the session cookie. Deliberately a real login
+    rather than a test-only auth bypass: these are the app's most sensitive
+    routes, and they should be exercised through the same middleware a browser
+    hits. `tests/test_auth.py` covers the anonymous side.
+    """
+    c = TestClient(app)
+    resp = c.post("/login", data={"password": TEST_DASHBOARD_PASSWORD}, follow_redirects=False)
+    assert resp.status_code == 303, f"test login failed: {resp.status_code}"
+    return c
 
 
 @pytest.fixture(autouse=True)

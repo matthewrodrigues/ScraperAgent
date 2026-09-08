@@ -21,3 +21,9 @@ node_modules/
 /blob-report/
 /playwright/.cache/
 /playwright/.auth/
+
+# Local database — created on first boot, never committed
+scraperagent.db
+scraperagent.db-journal
+scraperagent.db-wal
+scraperagent.db-shm
