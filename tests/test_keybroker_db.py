@@ -107,3 +107,66 @@ def test_list_friends_includes_revoked(broker_db):
     db.create_friend("bob", "hash-b", 5.0)
     db.revoke_friend("bob")
     assert {f["name"] for f in db.list_friends()} == {"alice", "bob"}
+
+
+def test_repeated_upstream_ref_updates_rather_than_being_ignored(broker_db):
+    """The first Apify reading is often wrong, so a correction must land."""
+    friend_id = db.create_friend("alice", "hash-alice", 5.0)
+    assert db.record_spend(friend_id, "apify", 0.03, upstream_ref="run_1") is True
+    assert db.record_spend(friend_id, "apify", 0.49, upstream_ref="run_1") is False
+    assert db.friend_month_spend(friend_id) == pytest.approx(0.49)
+
+
+def test_provisional_flag_defaults_off_and_round_trips(broker_db):
+    friend_id = db.create_friend("alice", "hash-alice", 5.0)
+    db.record_spend(friend_id, "anthropic", 0.02, upstream_ref="m1")
+    db.record_spend(friend_id, "apify", 0.50, upstream_ref="run_1", provisional=True)
+    assert db.get_spend_by_ref("anthropic", "m1")["provisional"] == 0
+    assert db.get_spend_by_ref("apify", "run_1")["provisional"] == 1
+    assert db.friend_month_provisional(friend_id) == pytest.approx(0.50)
+
+
+def test_settle_spend_clears_the_flag_and_rewrites_the_cost(broker_db):
+    friend_id = db.create_friend("alice", "hash-alice", 5.0)
+    db.record_spend(friend_id, "apify", 0.50, upstream_ref="run_1", provisional=True)
+    row = db.get_spend_by_ref("apify", "run_1")
+    db.settle_spend(row["id"], 0.492)
+    settled = db.get_spend_by_ref("apify", "run_1")
+    assert settled["provisional"] == 0
+    assert settled["cost_usd"] == pytest.approx(0.492)
+    assert db.friend_month_provisional(friend_id) == pytest.approx(0.0)
+
+
+def test_list_provisional_spend_honours_the_minimum_age(broker_db):
+    friend_id = db.create_friend("alice", "hash-alice", 5.0)
+    db.record_spend(friend_id, "apify", 0.50, upstream_ref="fresh", provisional=True)
+    with db.get_conn() as conn:
+        conn.execute(
+            "INSERT INTO spend (friend_id, vendor, cost_usd, upstream_ref, "
+            "provisional, created_at) VALUES (?, 'apify', 0.50, 'old', 1, "
+            "datetime('now', '-1 hour'))",
+            (friend_id,),
+        )
+    refs = [r["upstream_ref"] for r in db.list_provisional_spend("apify", 120)]
+    assert refs == ["old"]
+    assert {r["upstream_ref"] for r in db.list_provisional_spend("apify", 0)} == {
+        "fresh", "old"
+    }
+
+
+def test_column_migration_adds_provisional_to_an_existing_db(broker_db, monkeypatch):
+    """CREATE TABLE IF NOT EXISTS won't add a column, so init_db must migrate."""
+    with db.get_conn() as conn:
+        conn.execute("DROP TABLE spend")
+        conn.execute(
+            "CREATE TABLE spend ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, friend_id INTEGER NOT NULL, "
+            "vendor TEXT NOT NULL, model_or_actor TEXT, cost_usd REAL NOT NULL, "
+            "input_tokens INTEGER, output_tokens INTEGER, cache_read_tokens INTEGER, "
+            "cache_creation_tokens INTEGER, upstream_ref TEXT, "
+            "created_at TEXT NOT NULL DEFAULT (datetime('now')))"
+        )
+    db.init_db()
+    with db.get_conn() as conn:
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(spend)").fetchall()}
+    assert "provisional" in cols

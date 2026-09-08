@@ -401,7 +401,33 @@ python -m scripts.spend_report --month 2026-08
 ```
 
 Lists each friend's month-to-date spend against their budget, plus a global
-total against `BROKER_GLOBAL_MONTHLY_BUDGET_USD`.
+total against `BROKER_GLOBAL_MONTHLY_BUDGET_USD`. A `*` next to a total means it
+includes provisional Apify rows — see below.
+
+**Reconciling Apify spend (run this periodically):**
+
+```
+python -m scripts.reconcile_spend
+python -m scripts.reconcile_spend --dry-run
+```
+
+Apify's `usageTotalUsd` is not final when a run first reports as finished; it
+settles a few seconds later. Metering from that first reading under-metered real
+runs by more than 10x, and under-metering is the one failure a spend cap cannot
+survive — the leftover headroom just authorises the next over-budget run. So the
+broker debits each Apify run its *clamped ceiling* the moment the run is created
+— the most it can possibly cost — and flags the row provisional.
+`reconcile_spend` re-fetches those runs from Apify and replaces the estimate with
+what the run actually cost, which is normally a refund.
+
+Until you run it, Apify spend reads high and your friends see less headroom than
+they really have (never more). Schedule it every 15 minutes or so, the same way
+as the profile backup:
+
+```
+schtasks /create /tn "ScraperAgent reconcile spend" /sc minute /mo 15 ^
+  /tr "C:\dev\ScraperAgent\.venv\Scripts\python.exe -m scripts.reconcile_spend"
+```
 
 **The two caps.** Every friend has a `--budget` (default $5.00/month); once
 they hit it, the broker starts rejecting their requests until the calendar

@@ -279,3 +279,37 @@ def test_unset_owner_key_fails_closed_with_503(broker, monkeypatch):
     monkeypatch.setattr(config, "ANTHROPIC_API_KEY", "")
     r = client.post("/anthropic/v1/messages", json=_body(), headers={"x-api-key": token})
     assert r.status_code == 503
+
+
+def test_apify_run_creation_records_a_provisional_row_at_the_ceiling(broker, monkeypatch):
+    """The friend is debited the worst case up front, not Apify's first reading."""
+    client, token = broker
+    friend = db.get_friend_by_name("alice")
+    db.record_spend(friend["id"], "anthropic", 4.50, upstream_ref="m1")
+    _install(monkeypatch, httpx.Response(200, json={
+        "data": {"id": "r1", "actId": "actor~x", "status": "READY"}}))
+    client.post("/apify/v2/acts/actor~x/runs",
+                json={"queries": "laptop"},
+                headers={"authorization": f"Bearer {token}"})
+    row = db.get_spend_by_ref("apify", "r1")
+    assert row["provisional"] == 1
+    assert row["cost_usd"] == pytest.approx(0.50)
+
+
+def test_apify_poll_does_not_lower_the_provisional_debit(broker, monkeypatch):
+    client, token = broker
+    _install(monkeypatch, httpx.Response(200, json={
+        "data": {"id": "r1", "actId": "actor~x", "status": "READY"}}))
+    client.post("/apify/v2/acts/actor~x/runs",
+                json={"queries": "laptop"},
+                headers={"authorization": f"Bearer {token}"})
+    ceiling = db.get_spend_by_ref("apify", "r1")["cost_usd"]
+
+    _install(monkeypatch, httpx.Response(200, json={
+        "data": {"id": "r1", "actId": "actor~x", "status": "SUCCEEDED",
+                 "usageTotalUsd": 0.032}}))
+    client.get("/apify/v2/actor-runs/r1",
+               headers={"authorization": f"Bearer {token}"})
+    row = db.get_spend_by_ref("apify", "r1")
+    assert row["cost_usd"] == pytest.approx(ceiling)
+    assert row["provisional"] == 1

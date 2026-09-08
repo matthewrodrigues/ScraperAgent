@@ -133,12 +133,16 @@ async def _proxy(vendor: str, path: str, request: Request) -> Response:
         return Response(exc.detail, status_code=402)
 
     params = dict(request.query_params)
+    apify_ceiling_usd: float | None = None
     if vendor == "anthropic":
         body = clamps.clamp_anthropic(body)
     elif clamps.is_apify_run_creation(request.method, path):
         # The body is the actor's own input record and must survive untouched;
         # Apify reads the run's spend ceiling from the query string instead.
         params = clamps.clamp_apify_charge(params, quota.remaining_usd(friend))
+        # Remember what the run was actually capped at: that is the worst case
+        # this run can cost, and it is what the friend gets debited on creation.
+        apify_ceiling_usd = float(params[clamps.APIFY_CHARGE_PARAM])
 
     headers = {
         k: v for k, v in request.headers.items()
@@ -165,7 +169,16 @@ async def _proxy(vendor: str, path: str, request: Request) -> Response:
         if vendor == "anthropic":
             meter.record_anthropic(friend["id"], upstream.content)
         else:
-            meter.record_apify(friend["id"], upstream.content)
+            # A created run is debited at its clamped ceiling immediately, then
+            # settled by scripts.reconcile_spend — Apify's usage figure is not
+            # trustworthy at the moment the run first reports terminal. Anything
+            # that is not a run creation (or carries no run id) falls through to
+            # the defensive path.
+            debited = apify_ceiling_usd is not None and meter.record_apify_provisional(
+                friend["id"], upstream.content, apify_ceiling_usd
+            )
+            if not debited:
+                meter.record_apify(friend["id"], upstream.content)
 
     return Response(
         content=upstream.content,

@@ -207,15 +207,55 @@ differs per vendor.
 recording them now means adding prompt caching later does not silently
 mis-price. `upstream_ref` is the response `id`.
 
-**Apify.** Cost appears as `usageTotalUsd` on the run object. The broker
-records spend when a JSON response body carries a `data` object containing both
-a terminal `status` (`SUCCEEDED`, `FAILED`, `ABORTED`, `TIMED-OUT`) and
-`usageTotalUsd` — which covers both the run-creation response and the poll
-responses without the broker needing to route-match. `upstream_ref` is
-`data.id`. Because `.call()` polls, the same terminal run object is seen
-repeatedly, so writes are idempotent on the run id via a partial unique index
-and `INSERT OR IGNORE` — mirroring the `idx_messages_pending` idiom already in
-`db/schema.sql`.
+**Apify: `usageTotalUsd` settles late.** The original design metered Apify from
+the run object the moment it first reported a terminal status. Live testing
+showed that figure is not final. It settles some seconds *after* the run first
+reads terminal: two real runs were metered at $0.032 and $0.000, and re-fetching
+the same runs later showed $0.492 each. Compounding it, the write was an
+`INSERT OR IGNORE` keyed on `(vendor, upstream_ref)`, so the first — wrong, low
+— observation won permanently and the correct later value was discarded by
+design. Metered spend barely moved, `quota.remaining_usd` stayed near the full
+budget, and the pre-spend clamp kept authorising near-full-budget runs: the
+per-friend cap was roughly 27x leaky on Apify.
+
+**Apify: meter pessimistically, reconcile later.** The property a spend cap
+actually needs is *never under-meter*. So the broker no longer meters from that
+reading at all:
+
+1. **Provisional debit at run creation.** When the broker proxies a successful
+   run creation (the `/runs`, `/run-sync`, `/run-sync-get-dataset-items`
+   suffixes §6 already recognises) and the response carries `data.id`, it writes
+   a spend row for that run id immediately with `cost_usd` set to the ceiling it
+   clamped the request to — the `maxTotalChargeUsd` Apify was told to enforce —
+   and `provisional = 1`. That is the maximum the run can possibly cost, so the
+   friend's budget is debited for the worst case up front. `upstream_ref` is
+   `data.id`; `model_or_actor` is `actId`.
+2. **Polls never settle a provisional row.** `meter.record_apify` skips any run
+   that already has a provisional row, because the terminal reading it would
+   write is exactly the unreliable one. It still records terminal runs that have
+   *no* provisional row — a defensive path for a run id the broker never saw
+   created.
+3. **`scripts.reconcile_spend` settles it.** An owner-side maintenance script
+   finds provisional Apify rows older than a settling delay
+   (`--min-age-seconds`, default 120), re-fetches each run from Apify with the
+   owner's own `APIFY_TOKEN` *directly* — not through the broker, which would
+   meter the lookup as the friend's spend — and rewrites `cost_usd` to the true
+   `usageTotalUsd` with `provisional = 0`. `--dry-run` prints the changes
+   without writing. Run it on a schedule; until it runs, unreconciled Apify runs
+   stand at their worst case, so friends see less headroom than they really
+   have, never more.
+
+Because a correction has to be able to land, `db.record_spend` is an **upsert**
+on the `(vendor, upstream_ref)` partial unique index rather than an
+`INSERT OR IGNORE`. It still returns `False` when a row already existed, so
+repeated polls are still "recorded once" from the caller's point of view — the
+row is overwritten, not duplicated. Deciding whether a given correction is
+*trustworthy* is the caller's job, and only `reconcile_spend` clears
+`provisional`.
+
+`scripts.spend_report` marks any friend whose month-to-date total includes
+provisional rows with a `*` and a footnote, so an unsettled worst case is never
+mistaken for a real bill.
 
 **Two ledgers, deliberately.** The app's existing per-search cost tracking
 (`reference_prices.cost_usd`, `messages.cost_usd`) is untouched and continues to
@@ -293,6 +333,7 @@ CREATE TABLE IF NOT EXISTS spend (
     cache_read_tokens     INTEGER,
     cache_creation_tokens INTEGER,
     upstream_ref          TEXT,                 -- message id / run id
+    provisional           INTEGER NOT NULL DEFAULT 0,  -- 1 = worst-case estimate
     created_at            TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
@@ -300,6 +341,12 @@ CREATE INDEX IF NOT EXISTS idx_spend_friend_time ON spend(friend_id, created_at)
 CREATE UNIQUE INDEX IF NOT EXISTS idx_spend_upstream
     ON spend(vendor, upstream_ref) WHERE upstream_ref IS NOT NULL;
 ```
+
+`provisional` was added after the schema shipped, so `keybroker/db.py` carries a
+`_COLUMN_MIGRATIONS` list and an `_apply_column_migrations()` mirroring
+`db/repo.py`: `CREATE TABLE IF NOT EXISTS` does nothing to a table that already
+exists, so an existing `broker.db` needs the `ALTER TABLE` to pick the column
+up. The unique index is a *conflict target*, not merely a dedupe: see §7.
 
 Revocation sets `revoked_at`; rows are never deleted, so spend history survives
 a departed friend.
@@ -443,9 +490,23 @@ restarting one does not interrupt the other.
 - **Trust model is social.** Friends could exhaust their own budget
   deliberately. The global cap bounds total damage; nothing else is enforced.
 - **Apify metering depends on response shape.** If Apify renames
-  `usageTotalUsd`, metering silently records nothing. Mitigated by the pre-spend
-  `max_total_charge_usd` query-parameter clamp, which does not depend on parsing
-  the response.
+  `usageTotalUsd`, `scripts.reconcile_spend` settles nothing and every Apify row
+  stays provisional. That fails *safe* — the friend remains debited the clamped
+  ceiling — but it over-charges silently, so a spend report where nothing ever
+  loses its `*` is the symptom to look for.
+- **Apify figures are worst-case until reconciled.** Between a run's creation
+  and the next `scripts.reconcile_spend`, the ledger holds the run's clamped
+  ceiling, not its cost. Every consumer of broker spend — the quota check, the
+  spend report, the global cap — reads a high number during that window, which
+  is deliberate: over-metering costs a friend some headroom, under-metering
+  costs the owner real money. If the script is never run, the ledger drifts
+  permanently high and friends hit their cap early. The spend report's `*`
+  footnote is the only thing telling the owner this is happening, so it must not
+  be dropped.
+- **The reconcile window is unbounded.** Nothing expires a provisional row. A
+  run that Apify no longer returns (deleted, or a token that lost access) stays
+  provisional and worst-cased forever. Accepted at this scale: it errs high, and
+  the owner can settle such a row by hand.
 - **Overspend is bounded, not eliminated.** Metering happens after the response
   arrives, so the headroom reservation in §8 is what keeps the budget close to a
   ceiling — but it reserves for one call, and the quota check and the metering

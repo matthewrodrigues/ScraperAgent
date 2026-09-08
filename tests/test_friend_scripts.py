@@ -70,3 +70,25 @@ def test_spend_report_honours_an_explicit_month(broker_db, capsys):
     capsys.readouterr()
     spend_report.main(["--month", "2026-08"])
     assert "3.00" in capsys.readouterr().out
+
+
+def test_spend_report_marks_provisional_rows(broker_db, capsys):
+    add_friend.main(["alice"])
+    friend = db.get_friend_by_name("alice")
+    db.record_spend(friend["id"], "apify", 0.50, upstream_ref="run_1", provisional=True)
+    capsys.readouterr()
+
+    assert spend_report.main([]) == 0
+    out = capsys.readouterr().out
+    assert "0.50*" in out
+    assert "reconcile_spend" in out
+
+
+def test_spend_report_has_no_footnote_when_nothing_is_provisional(broker_db, capsys):
+    add_friend.main(["alice"])
+    friend = db.get_friend_by_name("alice")
+    db.record_spend(friend["id"], "anthropic", 1.25, upstream_ref="m1")
+    capsys.readouterr()
+
+    spend_report.main([])
+    assert "reconcile_spend" not in capsys.readouterr().out

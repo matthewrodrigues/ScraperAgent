@@ -82,3 +82,42 @@ def test_repeated_apify_polls_record_once(friend):
 def test_failed_runs_still_cost_money_and_are_recorded(friend):
     meter.record_apify(friend, _apify_body(status="FAILED", usage=0.01))
     assert db.friend_month_spend(friend) == pytest.approx(0.01)
+
+
+def _creation_body(run_id="run_1", status="READY"):
+    """What Apify returns from POST .../runs — a run object with no usage yet."""
+    return json.dumps({
+        "data": {"id": run_id, "actId": "actor~x", "status": status}
+    }).encode()
+
+
+def test_run_creation_records_a_provisional_row_at_the_ceiling(friend):
+    assert meter.record_apify_provisional(friend, _creation_body(), 0.50) is True
+    with db.get_conn() as conn:
+        row = conn.execute("SELECT * FROM spend").fetchone()
+    assert row["cost_usd"] == pytest.approx(0.50)
+    assert row["provisional"] == 1
+    assert row["upstream_ref"] == "run_1"
+    assert row["vendor"] == "apify"
+    assert row["model_or_actor"] == "actor~x"
+
+
+def test_run_creation_without_a_run_id_records_nothing(friend):
+    body = json.dumps({"data": {"status": "READY"}}).encode()
+    assert meter.record_apify_provisional(friend, body, 0.50) is False
+    assert db.friend_month_spend(friend) == pytest.approx(0.0)
+
+
+def test_poll_does_not_overwrite_a_provisional_row(friend):
+    """The terminal reading is exactly the one that settles late and low."""
+    meter.record_apify_provisional(friend, _creation_body(), 0.50)
+    meter.record_apify(friend, _apify_body(usage=0.032, run_id="run_1"))
+    assert db.friend_month_spend(friend) == pytest.approx(0.50)
+    assert db.get_spend_by_ref("apify", "run_1")["provisional"] == 1
+
+
+def test_terminal_run_with_no_provisional_row_is_still_recorded(friend):
+    """Defensive path: a run the broker never saw created."""
+    meter.record_apify(friend, _apify_body(usage=0.04, run_id="orphan"))
+    assert db.friend_month_spend(friend) == pytest.approx(0.04)
+    assert db.get_spend_by_ref("apify", "orphan")["provisional"] == 0
