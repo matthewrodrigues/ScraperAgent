@@ -43,3 +43,17 @@ def tmp_db(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "DB_PATH", db_path)
     repo.init_db()
     return db_path
+
+# The broker's storage layer routes through keybroker.dialect, which chooses
+# Postgres whenever config.SUPABASE_DB_URL is set. A developer with a real
+# Supabase URL in .env would therefore have the ENTIRE test suite -- not just
+# the opt-in Postgres contract tests -- connect to the live project and write
+# to it. That happened once during development: a bare `pytest` created the
+# schema and inserted a friend row in production.
+#
+# So the suite pins itself to SQLite. The Postgres contract tests opt back in
+# deliberately, and only via SUPABASE_TEST_DB_URL, which must name a different
+# database.
+@pytest.fixture(autouse=True)
+def _never_touch_production_postgres(monkeypatch):
+    monkeypatch.setattr(config, "SUPABASE_DB_URL", "")
