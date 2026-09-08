@@ -51,6 +51,11 @@ _COLUMN_MIGRATIONS: list[tuple[str, str, str]] = [
     # Non-fatal degradation notice shown as a banner. Distinct from
     # error_message, which means the search failed.
     ("searches", "warning_message", "TEXT"),
+    # Sticky flag: at least one Apify run backing this search reported no
+    # settled usage, so its recorded cost is the declared ceiling rather than
+    # a real figure (see integrations/ebay_search.py and
+    # pricing/google_shopping.py). Never cleared once set.
+    ("searches", "costs_are_estimates", "INTEGER NOT NULL DEFAULT 0"),
 ]
 
 
@@ -129,6 +134,16 @@ def set_search_cost(search_id: int, cost_usd: float) -> None:
         conn.execute(
             "UPDATE searches SET search_cost_usd = ? WHERE id = ?",
             (round(cost_usd, 6), search_id),
+        )
+
+
+def set_search_costs_are_estimates(search_id: int) -> None:
+    """Mark this search as having at least one estimated (ceiling-fallback)
+    cost. Sticky: never cleared, and setting it more than once is harmless."""
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE searches SET costs_are_estimates = 1 WHERE id = ?",
+            (search_id,),
         )
 
 

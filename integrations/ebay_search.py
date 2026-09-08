@@ -163,6 +163,7 @@ class SearchResult(BaseModel):
     listings: list[Listing]
     cost_usd: float
     warning: str | None = None
+    cost_is_estimate: bool = False
 
 
 def _build_actor_input(criteria: ParsedCriteria) -> dict[str, Any]:
@@ -222,9 +223,24 @@ def search_ebay(criteria: ParsedCriteria, limit: int = 25) -> SearchResult:
         # model (3.x); usageTotalUsd is the raw camelCase key some older
         # mocks/dicts use. Keep this fallback order in sync with the
         # equivalent lookup in pricing/google_shopping.py.
-        cost_usd = float(
-            run_d.get("usage_total_usd") or run_d.get("usageTotalUsd") or 0.0
-        )
+        #
+        # Apify does not always have usage settled by the moment a run first
+        # reports SUCCEEDED — it can arrive seconds to minutes later. A charged
+        # run can therefore report 0 here even though real cost was incurred.
+        # Falling back to 0.0 would UNDER-record cost, which is exactly what
+        # cost_guard.spent_so_far must never do. Fall back to the declared
+        # ceiling instead: it is, by construction, >= actual cost.
+        reported_cost = run_d.get("usage_total_usd") or run_d.get("usageTotalUsd")
+        cost_is_estimate = not reported_cost
+        if cost_is_estimate:
+            cost_usd = config.EBAY_SEARCH_BUDGET_USD
+            log.warning(
+                "ebay_search: run reported no settled usage; recording the "
+                "declared ceiling $%.4f as an estimate instead of $0.0",
+                cost_usd,
+            )
+        else:
+            cost_usd = float(reported_cost)
         dataset_id = run_d.get("default_dataset_id") or run_d.get("defaultDatasetId")
         # Fetched inside this try: the run has already been charged by this
         # point, so a network failure here must still become an
@@ -245,7 +261,12 @@ def search_ebay(criteria: ParsedCriteria, limit: int = 25) -> SearchResult:
         listings.append(mapped)
 
     listings, warning = _apply_seller_filter(listings, criteria)
-    return SearchResult(listings=listings[:limit], cost_usd=cost_usd, warning=warning)
+    return SearchResult(
+        listings=listings[:limit],
+        cost_usd=cost_usd,
+        warning=warning,
+        cost_is_estimate=cost_is_estimate,
+    )
 
 
 def _apply_seller_filter(

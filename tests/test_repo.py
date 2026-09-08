@@ -473,6 +473,18 @@ def test_migration_adds_columns_to_a_preexisting_database(tmp_path, monkeypatch)
         cols = {row[1] for row in conn.execute("PRAGMA table_info(searches)").fetchall()}
     assert "search_cost_usd" in cols
     assert "warning_message" in cols
+    assert "costs_are_estimates" in cols
+
+
+def test_set_search_costs_are_estimates_and_read_back(tmp_db):
+    search_id = repo.create_search("headphones", {"title_keywords": "headphones"}, 250.0)
+    repo.set_search_costs_are_estimates(search_id)
+    assert repo.get_search(search_id)["costs_are_estimates"] == 1
+
+
+def test_costs_are_estimates_defaults_to_zero(tmp_db):
+    search_id = repo.create_search("headphones", {"title_keywords": "headphones"}, 250.0)
+    assert repo.get_search(search_id)["costs_are_estimates"] == 0
 
 
 def test_sum_total_cost_includes_search_cost(tmp_db):

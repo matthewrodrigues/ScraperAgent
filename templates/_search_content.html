@@ -33,9 +33,12 @@
        route is decoupled from search creation. See
        `.claude/plans/lets-do-the-per-refactored-kahan.md` for the rationale. #}
     <p class="muted cost-summary">
-        Search cost: <strong>${{ "%.2f"|format(costs.total) }}</strong>
+        Search cost: <strong>{{ "~$%.2f"|format(costs.total) if search.costs_are_estimates else "$%.2f"|format(costs.total) }}</strong>
         <span class="cost-breakdown">(Search ${{ "%.2f"|format(costs.search) }}, Apify ${{ "%.2f"|format(costs.apify) }}, Claude ${{ "%.2f"|format(costs.claude) }})</span>
     </p>
+    {% if search.costs_are_estimates %}
+        <p class="muted cost-estimate-note">~ At least one Apify run had not reported settled usage when this search finished, so this figure is a worst-case estimate, not an exact charge.</p>
+    {% endif %}
 
     {% if reference_prices %}
         <section class="reference-prices">

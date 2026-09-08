@@ -65,6 +65,8 @@ def discover(state: SearchState) -> SearchState:
     # The run was paid for regardless of what it matched, so record the cost
     # before any early return.
     repo.set_search_cost(search_id, result.cost_usd)
+    if result.cost_is_estimate:
+        repo.set_search_costs_are_estimates(search_id)
 
     if result.warning:
         repo.set_search_warning(search_id, result.warning)
@@ -136,11 +138,16 @@ def reference_prices(state: SearchState) -> SearchState:
     )
 
     try:
-        price_points, cost_usd = google_shopping.fetch(criteria, max_charge_usd=remaining)
+        price_points, cost_usd, cost_is_estimate = google_shopping.fetch(
+            criteria, max_charge_usd=remaining
+        )
     except PricingSourceError as exc:
         log.warning("google_shopping failed for search_id=%s: %s", search_id, exc)
         repo.update_search_status(search_id, "awaiting_selection")
         return {}
+
+    if cost_is_estimate:
+        repo.set_search_costs_are_estimates(search_id)
 
     buckets = aggregator.by_condition(price_points)
     # Spread the run cost across the per-condition rows we'll write. Trivial

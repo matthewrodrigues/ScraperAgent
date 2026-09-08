@@ -108,6 +108,24 @@ def test_returns_mapped_listings_and_cost(configured):
     assert [l.ebay_item_id for l in result.listings] == ["1", "2"]
     assert result.cost_usd == pytest.approx(0.05)
     assert result.warning is None
+    assert result.cost_is_estimate is False
+
+
+def test_falls_back_to_declared_ceiling_when_usage_unsettled(configured):
+    """The bug fix: Apify does not always have usage settled by the moment a
+    run first reports SUCCEEDED, so a charged run can report 0 here. Recording
+    0.0 would UNDER-record spend, which cost_guard.spent_so_far must never do.
+    EBAY_SEARCH_BUDGET_USD is >= actual cost by construction, so it is the
+    safe fallback — flagged as an estimate rather than treated as real."""
+    result = _run(_criteria(), _mock_client([_item("1")], usage=0.0))
+    assert result.cost_usd == pytest.approx(0.15)
+    assert result.cost_is_estimate is True
+
+
+def test_uses_real_usage_when_reported_and_does_not_flag_estimate(configured):
+    result = _run(_criteria(), _mock_client([_item("1")], usage=0.03))
+    assert result.cost_usd == pytest.approx(0.03)
+    assert result.cost_is_estimate is False
 
 
 def test_limit_is_applied_client_side(configured):

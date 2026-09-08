@@ -89,7 +89,7 @@ def test_post_searches_parse_haiku_failure_renders_empty_with_banner(mock_parse,
 from db import repo
 
 
-@patch("agents.graph.google_shopping.fetch", return_value=([], 0.0))
+@patch("agents.graph.google_shopping.fetch", return_value=([], 0.0, False))
 @patch("agents.graph.search_ebay", return_value=_FAKE_SEARCH_RESULT)
 def test_post_searches_persists_and_redirects(_mock_ebay, _mock_gshop, client):
     resp = client.post(
@@ -136,7 +136,7 @@ def test_post_searches_missing_max_price_returns_400(client):
     assert resp.status_code == 400
 
 
-@patch("agents.graph.google_shopping.fetch", return_value=([], 0.0))
+@patch("agents.graph.google_shopping.fetch", return_value=([], 0.0, False))
 @patch("agents.graph.search_ebay", return_value=_FAKE_SEARCH_RESULT)
 def test_post_searches_empty_condition_floor_treated_as_null(_mock_ebay, _mock_gshop, client):
     """Form sends `condition_floor=""` for "any" — we must coerce to None."""
@@ -1066,6 +1066,20 @@ def test_warning_banner_renders_when_present(client, tmp_db):
 def test_no_warning_banner_when_absent(client, tmp_db):
     search_id = repo.create_search("headphones", {"title_keywords": "headphones"}, 250.0)
     assert "warning-banner" not in client.get(f"/searches/{search_id}").text
+
+
+def test_cost_estimate_footnote_renders_when_flagged(client, tmp_db):
+    search_id = repo.create_search("headphones", {"title_keywords": "headphones"}, 250.0)
+    repo.set_search_costs_are_estimates(search_id)
+    body = client.get(f"/searches/{search_id}").text
+    assert "cost-estimate-note" in body
+    assert "worst-case estimate" in body
+    assert "~$" in body
+
+
+def test_no_cost_estimate_footnote_when_not_flagged(client, tmp_db):
+    search_id = repo.create_search("headphones", {"title_keywords": "headphones"}, 250.0)
+    assert "cost-estimate-note" not in client.get(f"/searches/{search_id}").text
 
 
 def test_warning_shows_alongside_listings_not_instead_of_them(client, tmp_db):

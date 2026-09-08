@@ -41,13 +41,40 @@ def test_fetch_returns_parsed_points_and_cost(configured):
     ]
     fake_client = _mock_client(_make_run(usage=0.04), items)
     with patch("pricing.google_shopping.ApifyClient", return_value=fake_client):
-        points, cost = google_shopping.fetch(
+        points, cost, is_estimate = google_shopping.fetch(
             ParsedCriteria(title_keywords="headphones", max_price=300.0), max_charge_usd=0.50
         )
 
     assert cost == 0.04
+    assert is_estimate is False
     assert [p["price"] for p in points] == [278.99, 249.5]
     assert points[0]["url"] == "https://x/1"
+
+
+def test_fetch_falls_back_to_ceiling_when_usage_unsettled(configured):
+    """The bug fix: Apify does not always have usage settled the moment a run
+    reports SUCCEEDED. Recording 0.0 in that case UNDER-records spend, which
+    cost_guard.spent_so_far must never do. The declared ceiling
+    (`max_charge_usd`) is >= actual cost by construction, so it is the safe
+    fallback — and the estimate must be flagged, not silently treated as
+    real."""
+    fake_client = _mock_client(_make_run(usage=0.0), [])
+    with patch("pricing.google_shopping.ApifyClient", return_value=fake_client):
+        points, cost, is_estimate = google_shopping.fetch(
+            ParsedCriteria(title_keywords="headphones"), max_charge_usd=0.31
+        )
+    assert cost == pytest.approx(0.31)
+    assert is_estimate is True
+
+
+def test_fetch_uses_real_usage_when_reported_and_does_not_flag_estimate(configured):
+    fake_client = _mock_client(_make_run(usage=0.02), [])
+    with patch("pricing.google_shopping.ApifyClient", return_value=fake_client):
+        _, cost, is_estimate = google_shopping.fetch(
+            ParsedCriteria(title_keywords="headphones"), max_charge_usd=0.31
+        )
+    assert cost == pytest.approx(0.02)
+    assert is_estimate is False
 
 
 def test_fetch_sends_search_query_country_language_limit(configured):
@@ -89,7 +116,7 @@ def test_fetch_drops_items_without_price(configured):
     ]
     fake_client = _mock_client(_make_run(), items)
     with patch("pricing.google_shopping.ApifyClient", return_value=fake_client):
-        points, _ = google_shopping.fetch(ParsedCriteria(title_keywords="x"), max_charge_usd=0.50)
+        points, _, _ = google_shopping.fetch(ParsedCriteria(title_keywords="x"), max_charge_usd=0.50)
     assert [p["title"] for p in points] == ["with price"]
 
 
@@ -97,7 +124,7 @@ def test_fetch_extracts_price_from_string(configured):
     items = [{"title": "x", "price": "$278.99"}]
     fake_client = _mock_client(_make_run(), items)
     with patch("pricing.google_shopping.ApifyClient", return_value=fake_client):
-        points, _ = google_shopping.fetch(ParsedCriteria(title_keywords="x"), max_charge_usd=0.50)
+        points, _, _ = google_shopping.fetch(ParsedCriteria(title_keywords="x"), max_charge_usd=0.50)
     assert points[0]["price"] == 278.99
 
 
@@ -147,7 +174,7 @@ def test_condition_defaults_to_new_when_absent(configured):
     items = [{"title": "x", "price": 100.0}]
     fake_client = _mock_client(_make_run(), items)
     with patch("pricing.google_shopping.ApifyClient", return_value=fake_client):
-        points, _ = google_shopping.fetch(ParsedCriteria(title_keywords="x"), max_charge_usd=0.50)
+        points, _, _ = google_shopping.fetch(ParsedCriteria(title_keywords="x"), max_charge_usd=0.50)
     assert points[0]["condition"] == "new"
 
 

@@ -70,6 +70,39 @@ def test_discover_happy_path_persists_listings(tmp_db):
     assert result.get("error") is None
 
 
+def test_discover_estimate_flag_sets_costs_are_estimates(tmp_db):
+    search_id = _make_search()
+    with patch(
+        "agents.graph.search_ebay",
+        return_value=_result([_listing()], cost_usd=0.15, cost_is_estimate=True),
+    ):
+        graph.discover({"search_id": search_id})
+
+    assert repo.get_search(search_id)["costs_are_estimates"] == 1
+
+
+def test_discover_zero_settled_usage_regression_shrinks_remaining_budget(tmp_db, monkeypatch):
+    """Pins the actual production bug: a discovery run that reported zero
+    settled usage must still be recorded as spend. Before the fix, cost_usd
+    fell back to 0.0, so cost_guard.remaining_budget(search_id) read the full
+    APIFY_BUDGET_USD even after a real, charged discovery run — letting
+    reference pricing launch with a ceiling higher than the true remaining
+    budget. After the fix the ceiling fallback records real spend, so
+    remaining_budget must be strictly less than the configured budget."""
+    import config as _config
+    from pricing import cost_guard
+
+    monkeypatch.setattr(_config, "APIFY_BUDGET_USD", 0.90)
+    search_id = _make_search()
+    with patch(
+        "agents.graph.search_ebay",
+        return_value=_result([_listing()], cost_usd=0.15, cost_is_estimate=True),
+    ):
+        graph.discover({"search_id": search_id})
+
+    assert cost_guard.remaining_budget(search_id) < _config.APIFY_BUDGET_USD
+
+
 def test_discover_ebay_error_sets_failed_status_and_records_message(tmp_db):
     search_id = _make_search()
 
@@ -116,7 +149,7 @@ def test_compiled_graph_runs_end_to_end(tmp_db):
     """Smoke test: compile the graph and invoke it — proves the wiring works."""
     search_id = _make_search()
     with patch("agents.graph.search_ebay", return_value=_result([_listing()])), \
-         patch("agents.graph.google_shopping.fetch", return_value=([], 0.02)):
+         patch("agents.graph.google_shopping.fetch", return_value=([], 0.02, False)):
         compiled = graph.build_graph()
         compiled.invoke({"search_id": search_id})
     assert repo.get_search(search_id)["status"] == "awaiting_selection"
@@ -183,7 +216,7 @@ def test_reference_prices_persists_aggregates_and_flips_status(tmp_db):
         {"price": 270.0, "condition": "new", "url": "u2", "title": "t2", "currency": "USD"},
         {"price": 290.0, "condition": "new", "url": "u3", "title": "t3", "currency": "USD"},
     ]
-    with patch("agents.graph.google_shopping.fetch", return_value=(fake_points, 0.05)):
+    with patch("agents.graph.google_shopping.fetch", return_value=(fake_points, 0.05, False)):
         graph.reference_prices({"search_id": search_id})
 
     rows = repo.list_reference_prices(search_id)
@@ -201,7 +234,7 @@ def test_reference_prices_groups_new_and_used_into_separate_rows(tmp_db):
         {"price": 200.0, "condition": "new", "url": "u1", "title": "t1", "currency": "USD"},
         {"price": 150.0, "condition": "used", "url": "u2", "title": "t2", "currency": "USD"},
     ]
-    with patch("agents.graph.google_shopping.fetch", return_value=(points, 0.04)):
+    with patch("agents.graph.google_shopping.fetch", return_value=(points, 0.04, False)):
         graph.reference_prices({"search_id": search_id})
 
     rows = repo.list_reference_prices(search_id)
@@ -241,7 +274,7 @@ def test_reference_prices_skips_when_budget_exhausted(tmp_db, monkeypatch):
 def test_reference_prices_empty_results_still_flips_status(tmp_db):
     """Actor returns zero items (e.g. obscure query) — node still finishes cleanly."""
     search_id = _make_search()
-    with patch("agents.graph.google_shopping.fetch", return_value=([], 0.01)):
+    with patch("agents.graph.google_shopping.fetch", return_value=([], 0.01, False)):
         graph.reference_prices({"search_id": search_id})
 
     assert repo.list_reference_prices(search_id) == []
@@ -251,9 +284,10 @@ def test_reference_prices_empty_results_still_flips_status(tmp_db):
 from integrations import ebay_search as _ebay_search_mod
 
 
-def _result(listings, cost_usd=0.05, warning=None):
+def _result(listings, cost_usd=0.05, warning=None, cost_is_estimate=False):
     return _ebay_search_mod.SearchResult(
-        listings=listings, cost_usd=cost_usd, warning=warning
+        listings=listings, cost_usd=cost_usd, warning=warning,
+        cost_is_estimate=cost_is_estimate,
     )
 
 
