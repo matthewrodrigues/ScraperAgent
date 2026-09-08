@@ -15,9 +15,16 @@ A listing that cannot be parsed is skipped rather than failing the whole search.
 
 import logging
 import re
+from datetime import timedelta
+from decimal import Decimal
 from typing import Any
 
+from apify_client import ApifyClient
 from pydantic import BaseModel
+
+import config
+from agents.criteria_parser import ParsedCriteria
+from integrations import clients
 
 
 log = logging.getLogger(__name__)
@@ -124,3 +131,148 @@ def _map_item(item: dict[str, Any]) -> Listing | None:
         buying_options=["BEST_OFFER"],
         raw_data=item,
     )
+
+
+_DEFAULT_RUN_TIMEOUT_SECS = 120
+
+WARNING_NO_SELLER_FEEDBACK = (
+    "Seller feedback could not be retrieved for these listings, so your minimum "
+    "seller rating filter was not applied. Check each seller's feedback on eBay "
+    "before making an offer."
+)
+
+_client: ApifyClient | None = None
+
+
+def _get_client() -> ApifyClient:
+    global _client
+    if _client is None:
+        if not clients.apify_configured():
+            raise EbaySearchError(
+                "No Apify credentials. Set APIFY_TOKEN, or SCRAPERAGENT_BROKER_URL "
+                "and SCRAPERAGENT_BROKER_TOKEN to use a shared broker."
+            )
+        _client = ApifyClient(**clients.apify_kwargs())
+    return _client
+
+
+class SearchResult(BaseModel):
+    """What discovery produced: the listings, what the run cost, and any
+    non-fatal degradation the user should be told about."""
+
+    listings: list[Listing]
+    cost_usd: float
+    warning: str | None = None
+
+
+def _build_actor_input(criteria: ParsedCriteria) -> dict[str, Any]:
+    actor_input: dict[str, Any] = {
+        "keywords": [criteria.title_keywords or ""],
+        "ebaySite": "www.ebay.com",
+        # Best Offer only. Every result is negotiable, and we don't pay for
+        # listings the product can never act on.
+        "buyingFormat": "LH_BO",
+        "sortBy": "12",       # Best Match, matching the Browse API default
+        "maxPages": 1,        # a page is up to 240 items, well above any limit
+    }
+    if criteria.max_price is not None:
+        actor_input["maxPrice"] = int(criteria.max_price)
+    if criteria.must_not_keywords:
+        actor_input["excludeKeywords"] = " ".join(criteria.must_not_keywords)
+    # condition_floor is a FLOOR: "used" means used-or-better and must still
+    # admit new listings, so only "new" narrows the search.
+    if criteria.condition_floor == "new":
+        actor_input["condition"] = "1000"
+    return actor_input
+
+
+def search_ebay(criteria: ParsedCriteria, limit: int = 25) -> SearchResult:
+    """Discover Best-Offer-eligible listings matching `criteria`.
+
+    Raises EbaySearchError on failure; the message reaches the user verbatim.
+    An empty result set is NOT an error — the caller decides how to present it.
+    """
+    client = _get_client()
+
+    try:
+        run = client.actor(ACTOR_ID).call(
+            run_input=_build_actor_input(criteria),
+            wait_duration=timedelta(seconds=_DEFAULT_RUN_TIMEOUT_SECS),
+            max_total_charge_usd=Decimal(str(config.EBAY_SEARCH_BUDGET_USD)),
+        )
+    except Exception as exc:
+        raise EbaySearchError(_explain(exc)) from exc
+
+    if run is None:
+        raise EbaySearchError("eBay search returned no run.")
+    run_d = run.model_dump() if hasattr(run, "model_dump") else run
+    if (run_d.get("status") or "").upper() != "SUCCEEDED":
+        raise EbaySearchError(f"eBay search did not complete (status={run_d.get('status')}).")
+
+    cost_usd = float(
+        run_d.get("usage_total_usd") or run_d.get("usageTotalUsd") or 0.0
+    )
+    dataset_id = run_d.get("default_dataset_id") or run_d.get("defaultDatasetId")
+    raw_items = list(client.dataset(dataset_id).iterate_items()) if dataset_id else []
+
+    listings: list[Listing] = []
+    for item in raw_items:
+        mapped = _map_item(item)
+        if mapped is None:
+            log.warning("ebay_search: skipping unmappable item %r", item.get("item_id"))
+            continue
+        listings.append(mapped)
+
+    listings, warning = _apply_seller_filter(listings, criteria)
+    return SearchResult(listings=listings[:limit], cost_usd=cost_usd, warning=warning)
+
+
+def _apply_seller_filter(
+    listings: list[Listing], criteria: ParsedCriteria
+) -> tuple[list[Listing], str | None]:
+    """Apply the client-side seller-rating floor, unless ratings are missing
+    wholesale.
+
+    One listing without feedback is ordinary — a brand new seller. Every
+    listing without it means the actor's `seller_feedback_percent` field has
+    moved. Applying the filter then would drop every listing (it excludes
+    None), and the user would be told their criteria matched nothing — sending
+    them to widen filters that were never the problem. So we keep the listings,
+    skip the filter, and hand the caller a warning to show.
+    """
+    if criteria.min_seller_rating is None or not listings:
+        return listings, None
+
+    if all(l.seller_rating is None for l in listings):
+        log.error(
+            "ebay_search: no listing carried a seller feedback percentage; "
+            "the actor's output shape may have changed. Rating filter skipped."
+        )
+        return listings, WARNING_NO_SELLER_FEEDBACK
+
+    threshold = criteria.min_seller_rating
+    return [
+        l for l in listings if l.seller_rating is not None and l.seller_rating >= threshold
+    ], None
+
+
+def _explain(exc: Exception) -> str:
+    """Turn a client exception into something a friend can act on.
+
+    These messages are shown verbatim on a failed search, so they name the
+    remedy rather than the stack frame.
+    """
+    status = getattr(exc, "status_code", None)
+    if status == 402:
+        return (
+            "Your monthly search budget with this broker is used up. Ask the "
+            "broker's owner to raise it, or set your own APIFY_TOKEN to pay "
+            "for your own usage."
+        )
+    if status == 503:
+        return (
+            "The shared broker is not available right now. Try again later, or "
+            "set your own APIFY_TOKEN and unset SCRAPERAGENT_BROKER_URL to run "
+            "searches on your own account."
+        )
+    return f"eBay search failed: {exc}"
