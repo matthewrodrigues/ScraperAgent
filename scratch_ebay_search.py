@@ -6,7 +6,8 @@ Why this exists: the actor's output shape is a third-party contract. If
 renamed `image_url` just becomes None. Running this after any actor update is
 how you find out.
 
-This spends real money (~$0.05 per run).
+This spends real money — up to $0.15 per run, since the actor has no
+input-level result cap and a broad query reaches the full budget ceiling.
 
 Usage:
     .venv/Scripts/python.exe scratch_ebay_search.py "sony wh-1000xm5" --max-price 250

@@ -66,7 +66,14 @@ APIFY_TOKEN = os.getenv("APIFY_TOKEN")
 APIFY_BUDGET_USD = float(os.getenv("APIFY_BUDGET_USD", "0.90"))
 
 # Discovery's own ceiling, deliberately separate from APIFY_BUDGET_USD above.
-# 25 results at $0.002 is ~$0.05; 0.15 leaves 3x headroom. It must not reuse the
+# The actor (delicious_zebu/ebay-product-listing-scraper) bills per scraped
+# result and has no input-level result cap — its `maxPages` still admits up to
+# 240 items per page, so nothing in the actor's own input stops a broad query.
+# This ceiling is therefore what actually stops the scrape, not a safety
+# margin over an expected cost: a live run confirmed a broad query reaches the
+# full $0.15 (75 results at $0.002 each), and that is the normal case, not a
+# worst case. 75 scraped results is comfortably more than the 25 the app keeps
+# after seller-rating and price filtering. It must not reuse the
 # reference-pricing budget: the key broker debits a friend the *declared*
 # ceiling provisionally, so an over-declared ceiling is a real charge against
 # their monthly budget until reconciliation settles it.

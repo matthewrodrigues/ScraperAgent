@@ -200,10 +200,15 @@ def search_ebay(criteria: ParsedCriteria, limit: int = 25) -> SearchResult:
             wait_duration=timedelta(seconds=_DEFAULT_RUN_TIMEOUT_SECS),
             max_total_charge_usd=Decimal(str(config.EBAY_SEARCH_BUDGET_USD)),
             # maxPages=1 in the actor input still admits up to 240 items —
-            # well above `limit` and above what EBAY_SEARCH_BUDGET_USD covers
-            # at $0.002/result. max_items stops the vendor at `limit` results;
-            # the client-side [:limit] slice below stays as a backstop since
-            # the two enforce at different layers.
+            # well above `limit`. This actor bills per scraped result and has
+            # no input-level result cap, so `max_items` (a platform feature
+            # for pay-per-result actors) is silently ignored here; it stays
+            # harmless to send in case a future actor honors it. The only
+            # thing that actually stops the scrape is `max_total_charge_usd`
+            # above — a live run confirmed a broad query reaches the full
+            # EBAY_SEARCH_BUDGET_USD (~75 results at $0.002/result) before any
+            # item-count limit would apply. The client-side [:limit] slice
+            # below is the real limiter on how many listings we keep.
             max_items=limit,
         )
 

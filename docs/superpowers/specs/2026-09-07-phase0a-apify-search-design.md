@@ -179,18 +179,26 @@ case, so later non-fatal degradations reuse it. It is distinct from
 
 Browse API search was free; Apify search is not. Two changes follow.
 
-**Discovery gets its own ceiling.** `EBAY_SEARCH_BUDGET_USD = 0.15`
-(25 results × $0.002 ≈ $0.05, with 3× headroom), passed as the run's
-`max_total_charge_usd`. It deliberately does **not** reuse `APIFY_BUDGET_USD`:
-the broker debits friends the *clamped ceiling* provisionally, so an
-over-declared ceiling is a real temporary charge against their budget.
+**Discovery gets its own ceiling.** `EBAY_SEARCH_BUDGET_USD = 0.15`, passed as
+the run's `max_total_charge_usd`. This actor has no input-level result cap
+(`maxPages` alone still admits up to 240 items) and bills per scraped result,
+so the ceiling is not a safety margin over an expected cost — it is the only
+thing that stops the scrape. A live run confirmed this: requesting 5 listings
+still ran the actor up to the full $0.15 (75 results at $0.002 each) before
+aborting. 75 scraped results is ample headroom to yield the 25 the app keeps
+after seller-rating and price filtering, so 0.15 stays the ceiling; a broad
+query should be expected to reach it, not treated as an anomaly. It
+deliberately does **not** reuse `APIFY_BUDGET_USD`: the broker debits friends
+the *clamped ceiling* provisionally, so an over-declared ceiling is a real
+temporary charge against their budget.
 
 **`APIFY_BUDGET_USD` rises from 0.50 to 0.90.** Google Shopping costs ~$0.49 and
-already sat at the old cap (noted in `agents/graph.py`). Adding ~$0.05 of
-discovery would push a search past $0.50, causing `cost_guard` to block
-reference pricing on every search — a silent loss of market comparison, not a
-budget nicety. Total provisional exposure per search becomes $1.05, settling to
-roughly $0.54.
+already sat at the old cap (noted in `agents/graph.py`). Adding up to $0.15 of
+discovery (the full ceiling, since a broad query reaches it — see above) would
+push a search past $0.50, causing `cost_guard` to block reference pricing on
+every search — a silent loss of market comparison, not a budget nicety. Total
+provisional exposure per search becomes $1.05 (0.90 + 0.15), settling to as
+much as roughly $0.64 (0.49 + 0.15) in the worst case.
 
 **Where the cost lives.** A new `search_cost_usd REAL NOT NULL DEFAULT 0` column
 on `searches`, added via the existing `_apply_column_migrations` path in
@@ -216,8 +224,8 @@ validates against `_REF_PRICES_PLANNED_COST_USD = 0.50` while authorizing a run
 that may cost the whole budget. With discovery added at $0.90:
 
 ```
-eBay search spends              ~$0.05
-guard: 0.05 + 0.50 <= 0.90       -> passes
+eBay search spends              up to $0.15  (the ceiling, not an estimate)
+guard: 0.15 + 0.50 <= 0.90       -> passes
 Google Shopping ceiling          = $0.90   (full budget, not remaining)
 worst-case search total          = $1.05   (exceeds the cap it was checked against)
 ```
@@ -348,9 +356,27 @@ budget as `max_total_charge_usd` rather than the full `APIFY_BUDGET_USD`
   `price` or `item_id` shows up as every listing being skipped. The smoke
   script remains the way to check shape deliberately.
 - **Listing age is gone**, costing one strategy signal (§5).
-- **Follow-up: replace the Google Shopping actor.** At ~$0.49 it is roughly 90%
-  of per-search cost, an order of magnitude more than the eBay search this spec
-  adds. That is the real cost problem and deserves its own investigation.
+- **Follow-up: replace the Google Shopping actor.** At ~$0.49 it is still the
+  larger of the two Apify spenders, though no longer an order of magnitude
+  larger: a broad query routinely runs the eBay search up to its full $0.15
+  ceiling (see below), putting the two within about 3x of each other rather
+  than 10x. Google Shopping remains the bigger cost problem and deserves its
+  own investigation.
+- **The eBay search actor has no result limit; the cost ceiling is load-bearing,
+  not defensive.** `delicious_zebu/ebay-product-listing-scraper` bills per
+  scraped result and its input schema exposes `maxPages` but no per-item cap —
+  `maxPages: 1` alone still admits up to 240 items. Neither `maxPages` nor the
+  `max_items` argument passed to the Apify client's `.call()` constrains the
+  scrape (`max_items` is a platform feature for pay-per-result actors; this
+  actor is pay-per-event, so it is silently ignored). `max_total_charge_usd`
+  (`EBAY_SEARCH_BUDGET_USD`) is therefore the only thing that stops a run, and
+  a live test confirmed a broad query reaches it: requesting 5 listings ran
+  the actor to the full $0.15 before aborting. Per-search discovery cost is
+  accordingly up to $0.15, not the ~$0.05 originally assumed, and reaching the
+  ceiling on a broad query is expected behavior, not a bug. Accepted because
+  $0.15 buys ~75 scraped results — comfortably more than the 25 kept after
+  seller-rating and price filtering — and lowering the ceiling risks thin
+  result sets instead of saving money on any query it would actually affect.
 - **Follow-up: Phase 0b.** Until it lands, a friend can search, rank, and place
   a Best Offer, but cannot message sellers, check offer status, or have replies
   detected.

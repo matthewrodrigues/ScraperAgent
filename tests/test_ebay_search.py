@@ -116,9 +116,11 @@ def test_limit_is_applied_client_side(configured):
 
 
 def test_max_items_passed_equal_to_limit(configured):
-    """M3: maxPages=1 in the actor input admits up to 240 items, well past
-    the budget ceiling at $0.002/result. max_items on the .call() kwarg is
-    what actually stops the vendor at `limit` results."""
+    """M3: we still pass max_items=limit on the .call() kwarg, on the chance a
+    future actor honors it. This actor does not: it bills per scraped result
+    with no input-level result cap, so max_items is silently ignored and
+    max_total_charge_usd (EBAY_SEARCH_BUDGET_USD) is what actually stops the
+    run. This test only asserts we send the parameter, not that it works."""
     client = _mock_client([_item("1")])
     _run(_criteria(), client, limit=17)
     kwargs = client.actor.return_value.call.call_args.kwargs

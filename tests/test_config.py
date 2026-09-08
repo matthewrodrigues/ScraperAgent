@@ -75,6 +75,7 @@ def test_ebay_search_budget_default():
 
 
 def test_apify_budget_default_covers_discovery_plus_pricing():
-    # Google Shopping costs ~$0.49 and discovery ~$0.05; the cap must clear both
-    # or cost_guard blocks reference pricing on every search.
+    # Google Shopping costs ~$0.49 and discovery up to $0.15 (the actor has no
+    # result cap, so a broad query reaches its ceiling); the combined cap must
+    # clear both or cost_guard blocks reference pricing on every search.
     assert config_module.APIFY_BUDGET_USD >= 0.60
