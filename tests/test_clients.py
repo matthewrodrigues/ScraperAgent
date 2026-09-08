@@ -49,3 +49,30 @@ def test_apify_kwargs_brokered_points_at_broker(brokered):
 def test_brokered_kwargs_never_leak_the_real_vendor_key(brokered):
     assert "sk-real-anthropic" not in clients.anthropic_kwargs().values()
     assert "apify-real-token" not in clients.apify_kwargs().values()
+
+
+def test_configured_true_with_only_broker_vars(monkeypatch):
+    monkeypatch.setattr(config, "BROKER_URL", "https://broker.example.ts.net")
+    monkeypatch.setattr(config, "BROKER_TOKEN", "sa_friendtoken")
+    monkeypatch.setattr(config, "ANTHROPIC_API_KEY", "")
+    monkeypatch.setattr(config, "APIFY_TOKEN", "")
+    assert clients.anthropic_configured() is True
+    assert clients.apify_configured() is True
+
+
+def test_configured_true_with_only_direct_vendor_keys(monkeypatch):
+    monkeypatch.setattr(config, "BROKER_URL", "")
+    monkeypatch.setattr(config, "BROKER_TOKEN", "")
+    monkeypatch.setattr(config, "ANTHROPIC_API_KEY", "sk-real-anthropic")
+    monkeypatch.setattr(config, "APIFY_TOKEN", "apify-real-token")
+    assert clients.anthropic_configured() is True
+    assert clients.apify_configured() is True
+
+
+def test_configured_false_with_neither(monkeypatch):
+    monkeypatch.setattr(config, "BROKER_URL", "")
+    monkeypatch.setattr(config, "BROKER_TOKEN", "")
+    monkeypatch.setattr(config, "ANTHROPIC_API_KEY", "")
+    monkeypatch.setattr(config, "APIFY_TOKEN", "")
+    assert clients.anthropic_configured() is False
+    assert clients.apify_configured() is False

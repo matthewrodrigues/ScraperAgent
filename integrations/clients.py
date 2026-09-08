@@ -29,3 +29,13 @@ def apify_kwargs() -> dict[str, Any]:
             "api_url": f"{config.BROKER_URL}/apify",
         }
     return {"token": config.APIFY_TOKEN}
+
+
+def anthropic_configured() -> bool:
+    """True when `anthropic_kwargs()` can produce usable credentials."""
+    return bool(config.BROKER_URL or config.ANTHROPIC_API_KEY)
+
+
+def apify_configured() -> bool:
+    """True when `apify_kwargs()` can produce usable credentials."""
+    return bool(config.BROKER_URL or config.APIFY_TOKEN)
