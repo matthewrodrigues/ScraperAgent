@@ -30,8 +30,8 @@ This is the single largest barrier to anyone but the owner running the app.
 
 - A friend with `SCRAPERAGENT_BROKER_URL`/`TOKEN` and no eBay credentials
   completes a search and sees ranked, Best-Offer-eligible listings.
-- `EBAY_APP_ID` and `EBAY_CERT_ID` no longer appear in `config.py` or
-  `.env.example`.
+- A friend never needs an eBay developer keyset for *discovery*. (`EBAY_APP_ID`
+  and `EBAY_CERT_ID` remain in config until Phase 0b — see §9.)
 - The existing suite passes, with Browse API tests rewritten rather than deleted.
 
 ## 2. Non-goals
@@ -70,10 +70,11 @@ def search_ebay(criteria: ParsedCriteria, limit: int = 25) -> list[Listing]
 `add_listings`, the ranking code, and the templates all keep working.
 
 Rejected alternative: a config-switchable `SearchProvider` protocol keeping both
-implementations. That would leave `EBAY_APP_ID`/`CERT_ID` in config, in
-`.env.example`, and in a friend's mental model of what they must obtain — the
-credential is the thing being removed, so a code path needing it defeats the
-purpose.
+implementations. The keyset stays in config either way (it serves the Trading
+API — see §9), so the argument is not about deleting a variable. It is that a
+Browse code path leaves *discovery* dependent on a credential a friend cannot
+obtain, which is the entire barrier this phase exists to remove. A fallback
+nobody can use is not a fallback.
 
 ## 4. Actor and input mapping
 
@@ -313,13 +314,20 @@ before the mapping is trusted.
 
 ## 9. Deletions and config changes
 
-**Deleted:** `browser/ebay.py`, the `browser/` package, `EBAY_APP_ID` and
-`EBAY_CERT_ID` from `config.py` and `.env.example`, and the Browse API tests in
-`tests/test_ebay_search.py` (rewritten against the actor payload).
+**Deleted:** `browser/ebay.py`, the `browser/` package, and the Browse API tests
+in `tests/test_ebay_search.py` (rewritten against the actor payload).
 
-**Retained:** `EBAY_USER_TOKEN`, `integrations/ebay_trading.py`,
-`api/routes/ebay_notifications.py`, and the `/ebay/account-deletion` entry in
-`EXEMPT_PATHS` — all still required until Phase 0b.
+**Retained — including two this spec originally said to delete:**
+`EBAY_USER_TOKEN`, `EBAY_DEV_ID`, `integrations/ebay_trading.py`,
+`api/routes/ebay_notifications.py`, the `/ebay/account-deletion` entry in
+`EXEMPT_PATHS`, and **`EBAY_APP_ID` + `EBAY_CERT_ID`**.
+
+The last two were originally listed for deletion on the belief that they were
+Browse-API-only credentials. They are not: `integrations/ebay_trading.py:97-99`
+sends them as Trading API request headers (`X-EBAY-API-APP-NAME`,
+`X-EBAY-API-CERT-NAME`). One eBay keyset serves both APIs, so deleting them
+would break messaging, offer status, and the reply poller at runtime. All four
+eBay credentials leave together in Phase 0b.
 
 **Added:** `EBAY_SEARCH_BUDGET_USD = 0.15`; `APIFY_BUDGET_USD` default 0.50 →
 0.90; `searches.search_cost_usd`; `searches.warning_message`.
