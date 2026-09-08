@@ -38,7 +38,9 @@ platform rather than as a script someone remembered to schedule.
 **Success criteria**
 
 - With `SUPABASE_DB_URL` set, `python -m keybroker` creates both tables in
-  Supabase and serves proxied requests against them.
+  Supabase and serves proxied requests against them. Connectivity and
+  credentials were verified ahead of implementation: PostgreSQL 17.6, session
+  pooler on 5432, empty `public` schema.
 - With it unset, behaviour is identical to today.
 - The existing broker test suite passes unchanged, offline.
 - A live smoke script confirms friend creation, provisional spend, settlement,
@@ -112,12 +114,27 @@ five queries per proxied request — token lookup, two quota sums, the clamp's
 remaining-budget read, and the meter write. Unpooled, that is five TCP and TLS
 handshakes per Claude call.
 
-**Use Supabase's direct connection (port 5432), not the transaction pooler
-(6543).** The broker is one long-lived process, so an in-process pool fits
-naturally and avoids pgBouncer's restrictions. The pool nonetheless sets
-`prepare_threshold=None`, because psycopg 3 auto-prepares statements after a few
-executions and pgBouncer's transaction mode rejects that — so moving to the
-pooler later is a URL change rather than a debugging session.
+**Use Supabase's session pooler (port 5432), not the transaction pooler
+(6543).** The broker is one long-lived process, so session mode — one backend
+per connection for that connection's life — is what an in-process pool wants.
+
+An earlier draft recommended the *direct* connection. **That is not usable in
+this deployment.** Verified against the real project: `db.<ref>.supabase.co`
+publishes an `AAAA` record only, and the owner's machine has no working global
+IPv6 route, so the hostname resolves to nothing that can be reached. Supabase
+made direct connections IPv6-only without the paid IPv4 add-on. The session
+pooler (`aws-0-<region>.pooler.supabase.com`) publishes `A` records and is
+reachable. Note its username differs: `postgres.<project-ref>`, not `postgres`.
+
+The pool sets `prepare_threshold=None` regardless, because psycopg 3
+auto-prepares statements after a few executions and pgBouncer's *transaction*
+mode rejects that — so a later move to port 6543 is a URL change rather than a
+debugging session.
+
+**The design is indifferent to which of the three modes is used**, because
+§4.1 removed all dependence on session state. That was decided for correctness
+under pooling; it also meant this connectivity blocker cost a string swap rather
+than a redesign.
 
 ### 4.1 Timestamps must not depend on session state
 
