@@ -34,7 +34,7 @@
        `.claude/plans/lets-do-the-per-refactored-kahan.md` for the rationale. #}
     <p class="muted cost-summary">
         Search cost: <strong>${{ "%.2f"|format(costs.total) }}</strong>
-        <span class="cost-breakdown">(Apify ${{ "%.2f"|format(costs.apify) }}, Claude ${{ "%.2f"|format(costs.claude) }})</span>
+        <span class="cost-breakdown">(Search ${{ "%.2f"|format(costs.search) }}, Apify ${{ "%.2f"|format(costs.apify) }}, Claude ${{ "%.2f"|format(costs.claude) }})</span>
     </p>
 
     {% if reference_prices %}
@@ -57,6 +57,16 @@
                 </tbody>
             </table>
         </section>
+    {% endif %}
+
+    {# Non-fatal degradation (e.g. seller feedback unavailable). Deliberately
+       outside the status branches below: a warning accompanies real results
+       rather than replacing them, so the user decides whether to proceed. #}
+    {% if search.warning_message %}
+        <div class="warning-banner">
+            <h2>Heads up</h2>
+            <p>{{ search.warning_message }}</p>
+        </div>
     {% endif %}
 
     {% if search.status == 'failed' %}

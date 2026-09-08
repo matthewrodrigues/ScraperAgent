@@ -3,9 +3,12 @@
 Single check used before every actor call: would launching this run push our
 spend past `config.APIFY_BUDGET_USD` for this search? If so, skip the call.
 
-Today there's only one source (Google Shopping, ~$0.02 per run), so the budget
-will never bite. Wiring this in now means adding amazon/walmart/etc. later is a
-drop-in — they all go through the same guard.
+There are two spenders now: eBay discovery (via the Apify actor, ~$0.05 per
+run) and reference pricing (Google Shopping, ~$0.49 per run). The ceiling
+handed to Apify as `max_total_charge_usd` is the *remaining* budget after
+whatever already ran, so the cap is enforced by the vendor, not just estimated
+and checked after the fact. Wiring this in now means adding amazon/walmart/etc.
+later is a drop-in — they all go through the same guard.
 """
 
 import config

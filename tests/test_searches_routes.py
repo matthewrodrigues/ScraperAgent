@@ -1054,3 +1054,37 @@ def test_selected_listing_card_shows_gap_badge(client):
     # the badge appears in the body. Same badge classes as the candidates table.
     assert "Selected for negotiation" in body
     assert "badge-under" in body
+
+
+def test_warning_banner_renders_when_present(client, tmp_db):
+    search_id = repo.create_search("headphones", {"title_keywords": "headphones"}, 250.0)
+    repo.set_search_warning(search_id, "Seller feedback could not be retrieved.")
+    body = client.get(f"/searches/{search_id}").text
+    assert "Seller feedback could not be retrieved." in body
+
+
+def test_no_warning_banner_when_absent(client, tmp_db):
+    search_id = repo.create_search("headphones", {"title_keywords": "headphones"}, 250.0)
+    assert "warning-banner" not in client.get(f"/searches/{search_id}").text
+
+
+def test_warning_shows_alongside_listings_not_instead_of_them(client, tmp_db):
+    """A warning is not a failure — the listings are real and still usable."""
+    search_id = repo.create_search("headphones", {"title_keywords": "headphones"}, 250.0)
+    repo.add_listings(search_id, [{
+        "ebay_item_id": "1", "title": "Sony WH-1000XM5", "price": 200.0,
+        "url": "https://www.ebay.com/itm/1", "buying_options": ["BEST_OFFER"],
+        "raw_data": {},
+    }])
+    repo.set_search_warning(search_id, "Seller feedback could not be retrieved.")
+    repo.update_search_status(search_id, "awaiting_selection")
+    body = client.get(f"/searches/{search_id}").text
+    assert "Seller feedback could not be retrieved." in body
+    assert "Sony WH-1000XM5" in body
+
+
+def test_cost_line_shows_discovery_separately(client, tmp_db):
+    search_id = repo.create_search("headphones", {"title_keywords": "headphones"}, 250.0)
+    repo.set_search_cost(search_id, 0.05)
+    body = client.get(f"/searches/{search_id}").text
+    assert "0.05" in body

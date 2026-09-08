@@ -149,7 +149,7 @@ def add_listings(search_id: int, listings: list[dict[str, Any]]) -> list[int]:
 
     `listings` are plain dicts matching the listings-table columns. We accept
     dicts (not the Pydantic Listing model) to keep this layer free of dependencies
-    on browser.ebay — the caller does the model_dump.
+    on integrations.ebay_search — the caller does the model_dump.
     """
     if not listings:
         return []
