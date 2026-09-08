@@ -703,6 +703,19 @@ def backend(request, tmp_path, monkeypatch):
         monkeypatch.setattr(config, "BROKER_DB_PATH", tmp_path / "broker.db")
 
     dialect.reset_for_tests()
+
+    # conftest.py has an autouse fixture that blanks config.SUPABASE_DB_URL so
+    # the suite can never reach production Postgres. This fixture deliberately
+    # re-points it at the TEST database above. Autouse fixtures run first, so
+    # the order is right -- but assert it rather than trust it: if the guard
+    # ever ran last, these tests would run on SQLite and PASS WHILE TESTING
+    # NOTHING, which is worse than failing.
+    expected = "postgres" if request.param == "postgres" else "sqlite"
+    assert dialect.active().name == expected, (
+        f"expected the {expected} backend, got {dialect.active().name} -- "
+        "fixture ordering changed and this test is no longer testing what it claims"
+    )
+
     db.init_db()
     if request.param == "postgres":
         with db.get_conn() as conn:
@@ -844,7 +857,7 @@ def test_never_prints_the_connection_string(monkeypatch, capsys):
     """A smoke script's output gets pasted into issues and chat logs."""
     secret = "postgresql://postgres:hunter2@db.example.supabase.co:5432/postgres"
     monkeypatch.setattr(config, "SUPABASE_DB_URL", secret)
-    monkeypatch.setattr(smoke_supabase, "_run_checks", lambda: None)
+    monkeypatch.setattr(smoke_supabase, "_run_checks", lambda _m: None)
     smoke_supabase.main([])
     out = capsys.readouterr()
     assert "hunter2" not in out.out + out.err
@@ -856,7 +869,7 @@ def test_reports_the_host_without_credentials(monkeypatch, capsys):
         config, "SUPABASE_DB_URL",
         "postgresql://postgres:hunter2@db.example.supabase.co:5432/postgres",
     )
-    monkeypatch.setattr(smoke_supabase, "_run_checks", lambda: None)
+    monkeypatch.setattr(smoke_supabase, "_run_checks", lambda _m: None)
     smoke_supabase.main([])
     assert "db.example.supabase.co" in capsys.readouterr().out
 ```
@@ -903,8 +916,7 @@ def _safe_target(url: str) -> str:
     return f"{parts.hostname}{parts.path}"
 
 
-def _run_checks() -> None:
-    marker = f"smoke-{uuid.uuid4().hex[:8]}"
+def _run_checks(marker: str) -> None:
     print(f"  dialect:        {dialect.active().name}")
 
     db.init_db()
@@ -936,11 +948,23 @@ def _run_checks() -> None:
     assert db.get_friend_by_token_hash(f"hash-{marker}") is None
     print("  revoke:         token no longer resolves")
 
-    with db.get_conn() as conn:
-        conn.execute(db._q("DELETE FROM friends WHERE name = ?"), (marker,))
-        if dialect.active().name == "postgres":
-            conn.commit()
-    print("  cleanup:        throwaway friend and its spend removed")
+
+def _cleanup(marker: str) -> None:
+    """Remove the throwaway friend and its spend.
+
+    Called from a finally, NOT inline after the assertions: this script writes
+    to the PRODUCTION project, so a failed check must not strand a row there.
+    Cleanup that only runs on success is cleanup that runs exactly when it is
+    least needed.
+    """
+    try:
+        with db.get_conn() as conn:
+            conn.execute(db._q("DELETE FROM friends WHERE name = ?"), (marker,))
+            if dialect.active().name == "postgres":
+                conn.commit()
+        print("  cleanup:        throwaway friend and its spend removed")
+    except Exception as exc:
+        print(f"  cleanup FAILED — remove friend '{marker}' by hand: {exc}", file=sys.stderr)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -956,8 +980,9 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     print(f"target: {_safe_target(config.SUPABASE_DB_URL)}")
+    marker = f"smoke-{uuid.uuid4().hex[:8]}"
     try:
-        _run_checks()
+        _run_checks(marker)
     except AssertionError as exc:
         print(f"FAILED: {exc}", file=sys.stderr)
         return 1
@@ -965,6 +990,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"FAILED: {type(exc).__name__}: {exc}", file=sys.stderr)
         return 1
     finally:
+        _cleanup(marker)
         dialect.active().close_pool()
 
     print("\nall checks passed")
