@@ -170,8 +170,43 @@ buyer-scoped account and needs no per-user login.
 
 ## Setup
 
-Requires Python 3.11+ and the user's installed Chrome (for Best Offer
+Requires Python 3.12+ and the user's installed Chrome (for Best Offer
 placement).
+
+### Recommended: uv
+
+[uv](https://docs.astral.sh/uv/) is a fast Python package manager that can
+fetch the right Python version itself, so a friend running their own copy
+doesn't need Python pre-installed correctly or to manage a venv by hand.
+
+```
+# Install uv (one-time): https://docs.astral.sh/uv/getting-started/installation/
+uv sync
+uv run playwright install chrome
+uv run python main.py
+```
+
+`uv sync` reads `pyproject.toml` (mirrored from `requirements.txt`) and
+creates a `.venv` with every dependency pinned exactly as below — it does not
+try to install ScraperAgent itself as a package, since this is a set of
+top-level modules run from the repo root, not a library.
+
+Everywhere below that says `python -m ...` or `python scripts/...`, a friend
+using uv can instead run `uv run python -m ...` from the repo root without
+ever activating or locating a venv, for example:
+
+```
+uv run python -m keybroker
+uv run python -m scripts.add_friend alice --budget 7.50
+uv run python -m scripts.revoke_friend alice
+uv run python -m scripts.spend_report
+uv run python -m scripts.reconcile_spend
+uv run python -m pytest
+```
+
+### Alternative: venv + pip
+
+This is the original workflow and remains fully supported:
 
 ```
 python -m venv .venv
