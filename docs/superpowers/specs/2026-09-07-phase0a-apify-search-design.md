@@ -102,7 +102,9 @@ new items. Getting this backwards would silently exclude new listings from every
 used-floor search.
 
 **`min_seller_rating` stays a client-side filter.** The actor has no input for
-it, so the existing post-response filtering is retained unchanged.
+it, so the existing post-response filtering is retained — with one exception:
+when seller ratings are unavailable for the whole run, the filter is skipped and
+the user is warned instead. See §5.1.
 
 **`limit`** is applied client-side after mapping, since the actor paginates by
 page rather than item count.
@@ -135,6 +137,43 @@ strategy signal. No code path breaks.
 **A listing that fails to parse is skipped, not fatal.** One malformed price
 must not fail an entire search. Skips log the offending `item_id` at WARNING.
 
+### 5.1 Degraded seller feedback
+
+`seller_feedback_percent` is the one mapped field whose loss is both silent and
+dangerous. If the actor renames it, every `seller_rating` becomes `None`, and
+the existing client-side filter — `seller_rating is not None and seller_rating
+>= threshold` (`browser/ebay.py:208`) — **fails closed**, dropping every
+listing. The search would then hit the zero-results path in §7 and tell the user
+no Best-Offer listings matched, sending them off to widen criteria that were
+never the problem.
+
+**Detection.** One listing missing a feedback percentage is ordinary — a brand
+new seller. *Every* listing in a successful run missing it is a broken contract.
+So: when a run returns at least one raw item but **no** item yields a parseable
+`seller_feedback_percent`, treat seller ratings as unavailable for that search.
+
+**Response — warn and let the user choose, do not fail.** Discovery:
+
+1. **Skips** the `min_seller_rating` filter rather than applying it to all-`None`
+   data, so listings survive instead of being silently annihilated.
+2. Records a warning on the search (see below) and completes normally into
+   `awaiting_selection`.
+
+The dashboard renders that warning as a banner on the search: seller feedback
+could not be retrieved, the minimum-rating filter was **not** applied, and the
+user should check sellers on eBay before making an offer. They may proceed at
+their own risk or abandon the search — the choice is theirs, made with the facts.
+
+A hard `EbaySearchError` was considered and rejected: the listings are still
+real and useful, and refusing to show them is a worse outcome than showing them
+with an honest caveat.
+
+**Storage.** A new `warning_message TEXT` column on `searches`, nullable, added
+through the same `_apply_column_migrations` path as `search_cost_usd`. It is
+deliberately a generic warning slot rather than a boolean flag for this one
+case, so later non-fatal degradations reuse it. It is distinct from
+`error_message`, which means the search failed.
+
 ## 6. Cost accounting
 
 Browse API search was free; Apify search is not. Two changes follow.
@@ -166,6 +205,39 @@ Rejected alternative: recording it as a `reference_prices` row with
 the guard evaluates, so a guard reading only `sum_apify_cost` under-reports what
 has already been spent and the budget stops meaning anything.
 
+### 6.1 `APIFY_BUDGET_USD` must be a real cap, not an estimate
+
+`cost_guard.under_budget()` computes `spent + planned <= APIFY_BUDGET_USD`, so
+the budget is intended as a **per-search total**. Today it is not one. The
+ceiling handed to the Google Shopping run is the *full* `APIFY_BUDGET_USD`
+(`pricing/google_shopping.py:77`) rather than what remains of it, and the guard
+validates against `_REF_PRICES_PLANNED_COST_USD = 0.50` while authorizing a run
+that may cost the whole budget. With discovery added at $0.90:
+
+```
+eBay search spends              ~$0.05
+guard: 0.05 + 0.50 <= 0.90       -> passes
+Google Shopping ceiling          = $0.90   (full budget, not remaining)
+worst-case search total          = $1.05   (exceeds the cap it was checked against)
+```
+
+**Fix: pass the remaining budget as the run ceiling**, the same clamp the broker
+already applies to a friend's run:
+
+```python
+remaining = max(0.0, config.APIFY_BUDGET_USD - repo.sum_apify_cost(search_id))
+# passed as max_total_charge_usd
+```
+
+`_REF_PRICES_PLANNED_COST_USD` is then the value actually being authorised
+rather than an independent estimate, so the number the guard checks and the
+number Apify enforces are the same number. `APIFY_BUDGET_USD` becomes a hard
+per-search cap enforced by the vendor, not a hope.
+
+This defect predates Phase 0a — it has been harmless only because the planned
+estimate happens to sit near the actual cost. Raising the budget is what pulls
+the two apart, so the fix belongs here.
+
 ## 7. Error handling
 
 `discover` already catches `EbaySearchError` and marks the search failed; that
@@ -178,6 +250,7 @@ messages are read by a friend rather than by the owner.
 | Broker returns **402** (budget exhausted) | `EbaySearchError` naming the budget and pointing at the owner |
 | Broker returns **503** or is unreachable | `EbaySearchError` saying the broker is down and that setting their own `APIFY_TOKEN` is an escape hatch |
 | A single item fails to parse | Skipped, logged; search continues |
+| **Every** item lacks a seller feedback percentage | Not an error — listings returned, rating filter skipped, `warning_message` set (§5.1) |
 | No results | Not an error — see below |
 
 Today every Apify failure collapses into one opaque message through a broad
@@ -220,8 +293,19 @@ mocked at module level, and no test touches the network.
   components.
 - **`cost_guard` counts `search_cost_usd`** — the regression guard for discovery
   starving reference pricing.
-- **The column migration** applies to a database created before it existed.
-- **`min_seller_rating` still filters client-side.**
+- **The reference-pricing ceiling is the remaining budget, not the full budget**
+  (§6.1): after discovery spends, the value passed as `max_total_charge_usd` is
+  `APIFY_BUDGET_USD` minus what the search has already spent, and a search whose
+  spend has reached the budget authorises a ceiling of zero rather than a
+  negative number.
+- **The column migrations** (`search_cost_usd`, `warning_message`) apply to a
+  database created before they existed.
+- **`min_seller_rating` still filters client-side** when ratings are present.
+- **Degraded seller feedback** (§5.1): a run where every item lacks a parseable
+  `seller_feedback_percent` returns its listings rather than dropping them,
+  skips the rating filter, and sets `warning_message`; a run where only *some*
+  items lack it behaves normally and sets no warning. This is the regression
+  guard for a silent actor field rename presenting as "no listings matched".
 
 `scratch_ebay_search.py` is rewritten as the live smoke test, matching the other
 scratch scripts. It is how actor output shape gets verified against reality
@@ -238,18 +322,23 @@ before the mapping is trusted.
 `EXEMPT_PATHS` — all still required until Phase 0b.
 
 **Added:** `EBAY_SEARCH_BUDGET_USD = 0.15`; `APIFY_BUDGET_USD` default 0.50 →
-0.90; `searches.search_cost_usd`.
+0.90; `searches.search_cost_usd`; `searches.warning_message`.
+
+**Changed:** `pricing/google_shopping.py` passes the *remaining* per-search
+budget as `max_total_charge_usd` rather than the full `APIFY_BUDGET_USD`
+(§6.1).
 
 ## 10. Accepted risks and follow-ups
 
 - **Best-Offer-only narrows results.** Non-negotiable listings no longer appear
   at all. Deliberate: every result is actionable and the search is cheaper. If
   empty results prove common in practice, revisit as "fetch all, rank BO first".
-- **Actor output shape is a third-party contract.** If `delicious_zebu` renames
-  a field, mapping silently degrades — a skipped listing logs, but a renamed
-  `seller_feedback_percent` would quietly become `None` and disable the seller
-  filter. The smoke test is the detection mechanism; there is no automated
-  guard.
+- **Actor output shape is a third-party contract.** A rename of
+  `seller_feedback_percent` is now detected automatically and surfaced to the
+  user (§5.1) rather than silently disabling seller filtering. Other fields
+  carry no such guard: a renamed `image_url` degrades quietly, and a renamed
+  `price` or `item_id` shows up as every listing being skipped. The smoke
+  script remains the way to check shape deliberately.
 - **Listing age is gone**, costing one strategy signal (§5).
 - **Follow-up: replace the Google Shopping actor.** At ~$0.49 it is roughly 90%
   of per-search cost, an order of magnitude more than the eBay search this spec
