@@ -1,0 +1,259 @@
+# Phase 0a — Apify listing search
+
+**Date:** 2026-09-07
+**Status:** Approved for planning
+**Scope:** Replace the eBay Browse API with an Apify actor for listing discovery.
+Phase 0b (replacing the three Trading API calls with Playwright) is deliberately
+out of scope.
+
+---
+
+## 1. Problem and goals
+
+`browser/ebay.py` fetches listings through eBay's Browse API using
+`EBAY_APP_ID` + `EBAY_CERT_ID`. Those are developer-portal credentials, so an
+invited friend cannot obtain them by signing into eBay in a browser. `discover`
+is the **first** node in the search graph (`agents/graph.py:139`), so a friend's
+search fails at step one, before any listing exists.
+
+This is the single largest barrier to anyone but the owner running the app.
+
+**Goals**
+
+1. Listing discovery works with no eBay developer credentials.
+2. The `discover` node's interface is unchanged: `search_ebay(criteria,
+   limit) -> list[Listing]`, raising `EbaySearchError`.
+3. Discovery spend is recorded and counted against the per-search budget.
+4. Failures a friend can act on say so in words they can act on.
+
+**Success criteria**
+
+- A friend with `SCRAPERAGENT_BROKER_URL`/`TOKEN` and no eBay credentials
+  completes a search and sees ranked, Best-Offer-eligible listings.
+- `EBAY_APP_ID` and `EBAY_CERT_ID` no longer appear in `config.py` or
+  `.env.example`.
+- The existing suite passes, with Browse API tests rewritten rather than deleted.
+
+## 2. Non-goals
+
+Phase 0b: `send_member_message`, `get_best_offer_status`, and the poller's
+`get_messages_for_item` keep using the Trading API. Consequently
+`EBAY_USER_TOKEN` **stays** in config, and `api/routes/ebay_notifications.py`
+plus the `/ebay/account-deletion` entry in `EXEMPT_PATHS` **stay** — deleting
+them requires having no keyset at all, which is only true after Phase 0b.
+
+Also out of scope: replacing the Google Shopping reference-pricing actor
+(tracked as a follow-up in §10), and any change to Best Offer placement, which
+already runs through Playwright.
+
+## 3. Architecture
+
+**New module `integrations/ebay_search.py`**, mirroring the established Apify
+pattern in `pricing/google_shopping.py`: a module-level cached client built from
+`clients.apify_kwargs()`, a domain exception, and cost returned alongside
+results.
+
+**Deleted:** `browser/ebay.py` and the `browser/` package. The name is an active
+hazard — it means eBay's *Browse API*, while `integrations/ebay_browser.py` one
+directory away is the actual Playwright browser. Two unrelated things called
+"browser". Phase 0a replaces that file's entire contents, so this is the one
+moment where fixing the name costs nothing.
+
+**Interface preserved exactly.** `agents/graph.py:20` changes its import; the
+`discover` node is otherwise untouched:
+
+```python
+def search_ebay(criteria: ParsedCriteria, limit: int = 25) -> list[Listing]
+```
+
+`Listing` and `EbaySearchError` move to the new module unchanged, so
+`add_listings`, the ranking code, and the templates all keep working.
+
+Rejected alternative: a config-switchable `SearchProvider` protocol keeping both
+implementations. That would leave `EBAY_APP_ID`/`CERT_ID` in config, in
+`.env.example`, and in a friend's mental model of what they must obtain — the
+credential is the thing being removed, so a code path needing it defeats the
+purpose.
+
+## 4. Actor and input mapping
+
+**Actor:** `delicious_zebu/ebay-product-listing-scraper` (id `8bXnzCF4JVgMMA5cM`),
+pay-per-event at **$0.002 per result**. Chosen because it is the only candidate
+whose output carries seller feedback percentage *and* count, and whose input
+supports a Best-Offer filter.
+
+Input built from `ParsedCriteria`:
+
+| Criteria | Actor input | Note |
+|---|---|---|
+| `title_keywords` | `keywords: [text]` | array, one search |
+| `must_not_keywords` | `excludeKeywords` | space-joined |
+| `max_price` | `maxPrice` | integer |
+| `condition_floor` | `condition` | see below |
+| — | `buyingFormat: "LH_BO"` | Best Offer only |
+| — | `ebaySite: "www.ebay.com"` | |
+| — | `sortBy: "12"` | Best Match, matching today's default ranking |
+| — | `maxPages: 1` | 240 items/page is well above `limit` |
+
+**Condition is a floor, not an equality.** `condition_floor == "new"` maps to
+`condition: "1000"` (new only). `condition_floor == "used"` or `None` **omits**
+the filter entirely, because "used" means "used or better" and must still admit
+new items. Getting this backwards would silently exclude new listings from every
+used-floor search.
+
+**`min_seller_rating` stays a client-side filter.** The actor has no input for
+it, so the existing post-response filtering is retained unchanged.
+
+**`limit`** is applied client-side after mapping, since the actor paginates by
+page rather than item count.
+
+## 5. Output mapping
+
+The actor returns strings throughout, so this is parsing, not renaming.
+
+| `Listing` field | Actor field | Transform |
+|---|---|---|
+| `ebay_item_id` | `item_id` | — |
+| `title` | `product_title` | — |
+| `price` | `price` | strip currency/separators → float |
+| `shipping_cost` | `shipping_cost` | "Free" → `0.0`; "+$5.99" → `5.99`; else `None` |
+| `condition` | `condition` | — |
+| `seller_id` | `seller_name` | — |
+| `seller_rating` | `seller_feedback_percent` | strip `%` → float |
+| `seller_feedback_count` | `seller_feedback_count` | strip separators → int |
+| `url` | `product_url` | — |
+| `image_url` | `image_url` | — |
+| `buying_options` | derived | `["BEST_OFFER"]` — every result is BO-filtered |
+| `listed_at` | *unavailable* | always `None` |
+| `raw_data` | whole item | as today |
+
+**`listed_at` is knowingly lost.** `strategies/__init__.py:173`
+(`_listing_age_days`) already returns `None` for a missing value, and line 125
+guards on it, so the only casualty is the "listing has sat more than 30 days"
+strategy signal. No code path breaks.
+
+**A listing that fails to parse is skipped, not fatal.** One malformed price
+must not fail an entire search. Skips log the offending `item_id` at WARNING.
+
+## 6. Cost accounting
+
+Browse API search was free; Apify search is not. Two changes follow.
+
+**Discovery gets its own ceiling.** `EBAY_SEARCH_BUDGET_USD = 0.15`
+(25 results × $0.002 ≈ $0.05, with 3× headroom), passed as the run's
+`max_total_charge_usd`. It deliberately does **not** reuse `APIFY_BUDGET_USD`:
+the broker debits friends the *clamped ceiling* provisionally, so an
+over-declared ceiling is a real temporary charge against their budget.
+
+**`APIFY_BUDGET_USD` rises from 0.50 to 0.90.** Google Shopping costs ~$0.49 and
+already sat at the old cap (noted in `agents/graph.py`). Adding ~$0.05 of
+discovery would push a search past $0.50, causing `cost_guard` to block
+reference pricing on every search — a silent loss of market comparison, not a
+budget nicety. Total provisional exposure per search becomes $1.05, settling to
+roughly $0.54.
+
+**Where the cost lives.** A new `search_cost_usd REAL NOT NULL DEFAULT 0` column
+on `searches`, added via the existing `_apply_column_migrations` path in
+`db/repo.py` so live databases upgrade in place. `sum_total_cost(search_id)`
+gains it as a third component beside `apify` and `claude`, and the dashboard
+shows discovery separately — otherwise the total matches no visible source.
+
+Rejected alternative: recording it as a `reference_prices` row with
+`source='ebay_search'`. A listing search is not a reference price, and
+`get_aggregated_ref_median` would then average it into market medians.
+
+**`pricing/cost_guard.py` must count it.** Discovery now runs and spends before
+the guard evaluates, so a guard reading only `sum_apify_cost` under-reports what
+has already been spent and the budget stops meaning anything.
+
+## 7. Error handling
+
+`discover` already catches `EbaySearchError` and marks the search failed; that
+contract is preserved. What changes is which failures are possible, and that the
+messages are read by a friend rather than by the owner.
+
+| Condition | Behaviour |
+|---|---|
+| Actor run fails, times out, or returns non-`SUCCEEDED` | `EbaySearchError` → search failed |
+| Broker returns **402** (budget exhausted) | `EbaySearchError` naming the budget and pointing at the owner |
+| Broker returns **503** or is unreachable | `EbaySearchError` saying the broker is down and that setting their own `APIFY_TOKEN` is an escape hatch |
+| A single item fails to parse | Skipped, logged; search continues |
+| No results | Not an error — see below |
+
+Today every Apify failure collapses into one opaque message through a broad
+`except Exception`. With a friend on the receiving end, "your monthly budget is
+exhausted" versus "actor call failed" is the difference between a self-service
+fix and a support request.
+
+**Zero results needs a real answer.** Filtering to Best-Offer-only makes empty
+results substantially more likely — many searches match listings where no seller
+accepts offers. Today an empty set reaches `awaiting_selection` with nothing to
+select, which reads as a broken app.
+
+Discovery therefore treats an empty result set exactly as it treats a search
+error: `repo.set_search_error(search_id, msg)` followed by
+`repo.update_search_status(search_id, "failed")`, where `msg` states that no
+Best-Offer listings matched and suggests widening the price range or condition.
+
+This is a deliberate imprecision: "no matches" is not really a failure, and a
+status like `no_results` would be more truthful. It is rejected because a new
+status value means touching the status enum, every template branch that renders
+status, and the poller's status filters — disproportionate for a message the
+user reads once. The user-visible text carries the real meaning; `failed` is
+only the mechanism.
+
+## 8. Testing
+
+Following `tests/test_google_shopping.py` conventions: the Apify client is
+mocked at module level, and no test touches the network.
+
+- **Mapping** against realistically-shaped payloads: `"$124.99"`, shipping
+  `"Free"` and `"+$5.99"`, feedback count `"1,234"`, missing optional fields.
+- **A malformed item is skipped** while its siblings still parse.
+- **Condition floor**: `"new"` sends `condition: "1000"`; `"used"` and `None`
+  send no condition filter.
+- **`buyingFormat: "LH_BO"`** is always present in the actor input.
+- **Zero results** produce the distinct error message, not a crash or an empty
+  selection page.
+- **Broker 402 and 503** each produce their specific `EbaySearchError` text.
+- **Cost lands on the `searches` row**; `sum_total_cost` reports three
+  components.
+- **`cost_guard` counts `search_cost_usd`** — the regression guard for discovery
+  starving reference pricing.
+- **The column migration** applies to a database created before it existed.
+- **`min_seller_rating` still filters client-side.**
+
+`scratch_ebay_search.py` is rewritten as the live smoke test, matching the other
+scratch scripts. It is how actor output shape gets verified against reality
+before the mapping is trusted.
+
+## 9. Deletions and config changes
+
+**Deleted:** `browser/ebay.py`, the `browser/` package, `EBAY_APP_ID` and
+`EBAY_CERT_ID` from `config.py` and `.env.example`, and the Browse API tests in
+`tests/test_ebay_search.py` (rewritten against the actor payload).
+
+**Retained:** `EBAY_USER_TOKEN`, `integrations/ebay_trading.py`,
+`api/routes/ebay_notifications.py`, and the `/ebay/account-deletion` entry in
+`EXEMPT_PATHS` — all still required until Phase 0b.
+
+**Added:** `EBAY_SEARCH_BUDGET_USD = 0.15`; `APIFY_BUDGET_USD` default 0.50 →
+0.90; `searches.search_cost_usd`.
+
+## 10. Accepted risks and follow-ups
+
+- **Best-Offer-only narrows results.** Non-negotiable listings no longer appear
+  at all. Deliberate: every result is actionable and the search is cheaper. If
+  empty results prove common in practice, revisit as "fetch all, rank BO first".
+- **Actor output shape is a third-party contract.** If `delicious_zebu` renames
+  a field, mapping silently degrades — a skipped listing logs, but a renamed
+  `seller_feedback_percent` would quietly become `None` and disable the seller
+  filter. The smoke test is the detection mechanism; there is no automated
+  guard.
+- **Listing age is gone**, costing one strategy signal (§5).
+- **Follow-up: replace the Google Shopping actor.** At ~$0.49 it is roughly 90%
+  of per-search cost, an order of magnitude more than the eBay search this spec
+  adds. That is the real cost problem and deserves its own investigation.
+- **Follow-up: Phase 0b.** Until it lands, a friend can search, rank, and place
+  a Best Offer, but cannot message sellers, check offer status, or have replies
+  detected.
