@@ -79,3 +79,17 @@ def test_apify_budget_default_covers_discovery_plus_pricing():
     # result cap, so a broad query reaches its ceiling); the combined cap must
     # clear both or cost_guard blocks reference pricing on every search.
     assert config_module.APIFY_BUDGET_USD >= 0.60
+
+
+def test_supabase_urls_default_to_empty():
+    """Unset means SQLite. An empty string is the 'use the local file' signal,
+    so it must never be None — callers test truthiness, not identity."""
+    assert config_module.SUPABASE_DB_URL == "" or isinstance(config_module.SUPABASE_DB_URL, str)
+    assert config_module.SUPABASE_TEST_DB_URL == "" or isinstance(config_module.SUPABASE_TEST_DB_URL, str)
+
+
+def test_supabase_url_is_read_from_the_environment(monkeypatch):
+    """Read at import in production, but the attribute is what code consults,
+    so tests patch the attribute rather than the environment."""
+    monkeypatch.setattr(config_module, "SUPABASE_DB_URL", "postgresql://u:p@h:5432/d")
+    assert config_module.SUPABASE_DB_URL.startswith("postgresql://")

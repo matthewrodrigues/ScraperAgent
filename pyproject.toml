@@ -30,6 +30,10 @@ dependencies = [
     "google-api-python-client==2.151.0",
     "google-auth-oauthlib==1.2.1",
     "google-auth-httplib2==0.2.0",
+    # Postgres driver for the key broker's Supabase backend. Binary wheel so
+    # Windows needs no build toolchain.
+    "psycopg[binary]==3.2.3",
+    "psycopg-pool==3.2.4",
     # Browser automation — used for buyer-initiated Best Offer placement, since
     # eBay's Trading API PlaceOffer is unreachable for OAuth tokens on this
     # account type (see memory `feedback_ebay_trading_gotchas.md` §3 +
