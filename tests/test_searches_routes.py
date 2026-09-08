@@ -7,8 +7,28 @@ from fastapi.testclient import TestClient
 
 from agents.criteria_parser import ParsedCriteria
 from api.main import app
+from integrations.ebay_search import Listing, SearchResult
 from integrations.ebay_trading import EbayTradingError, NoPartnerRelationshipError
 from tests.conftest import TEST_DASHBOARD_PASSWORD
+
+# integrations.ebay_search.search_ebay now returns a SearchResult, not a bare
+# list of listings. Zero listings is treated as a failed search (see
+# agents/graph.py discover()), so route tests that only care about
+# persistence/redirect/field-coercion behavior use a single fake listing to
+# stay on the successful path.
+_FAKE_SEARCH_RESULT = SearchResult(
+    listings=[
+        Listing(
+            ebay_item_id="v1|1|0",
+            title="Fake Listing",
+            price=100.0,
+            url="https://www.ebay.com/itm/1",
+            buying_options=["BEST_OFFER"],
+            raw_data={},
+        )
+    ],
+    cost_usd=0.0,
+)
 
 
 @pytest.fixture
@@ -69,8 +89,8 @@ def test_post_searches_parse_haiku_failure_renders_empty_with_banner(mock_parse,
 from db import repo
 
 
-@patch("agents.graph.google_shopping.fetch", return_value=([], 0.0))
-@patch("agents.graph.search_ebay", return_value=[])
+@patch("agents.graph.google_shopping.fetch", return_value=([], 0.0, False))
+@patch("agents.graph.search_ebay", return_value=_FAKE_SEARCH_RESULT)
 def test_post_searches_persists_and_redirects(_mock_ebay, _mock_gshop, client):
     resp = client.post(
         "/searches",
@@ -96,7 +116,7 @@ def test_post_searches_persists_and_redirects(_mock_ebay, _mock_gshop, client):
     assert row["criteria_structured"]["must_not_keywords"] == ["cracked", "broken"]
     assert row["criteria_structured"]["title_keywords"] == "iPhone 13 mini red 128GB"
     assert row["criteria_structured"]["condition_floor"] == "used"
-    # Graph ran end-to-end on submit; with zero listings we still flip status.
+    # Graph ran end-to-end on submit.
     assert row["status"] == "awaiting_selection"
 
 
@@ -116,8 +136,8 @@ def test_post_searches_missing_max_price_returns_400(client):
     assert resp.status_code == 400
 
 
-@patch("agents.graph.google_shopping.fetch", return_value=([], 0.0))
-@patch("agents.graph.search_ebay", return_value=[])
+@patch("agents.graph.google_shopping.fetch", return_value=([], 0.0, False))
+@patch("agents.graph.search_ebay", return_value=_FAKE_SEARCH_RESULT)
 def test_post_searches_empty_condition_floor_treated_as_null(_mock_ebay, _mock_gshop, client):
     """Form sends `condition_floor=""` for "any" — we must coerce to None."""
     resp = client.post(
@@ -1034,3 +1054,51 @@ def test_selected_listing_card_shows_gap_badge(client):
     # the badge appears in the body. Same badge classes as the candidates table.
     assert "Selected for negotiation" in body
     assert "badge-under" in body
+
+
+def test_warning_banner_renders_when_present(client, tmp_db):
+    search_id = repo.create_search("headphones", {"title_keywords": "headphones"}, 250.0)
+    repo.set_search_warning(search_id, "Seller feedback could not be retrieved.")
+    body = client.get(f"/searches/{search_id}").text
+    assert "Seller feedback could not be retrieved." in body
+
+
+def test_no_warning_banner_when_absent(client, tmp_db):
+    search_id = repo.create_search("headphones", {"title_keywords": "headphones"}, 250.0)
+    assert "warning-banner" not in client.get(f"/searches/{search_id}").text
+
+
+def test_cost_estimate_footnote_renders_when_flagged(client, tmp_db):
+    search_id = repo.create_search("headphones", {"title_keywords": "headphones"}, 250.0)
+    repo.set_search_costs_are_estimates(search_id)
+    body = client.get(f"/searches/{search_id}").text
+    assert "cost-estimate-note" in body
+    assert "worst-case estimate" in body
+    assert "~$" in body
+
+
+def test_no_cost_estimate_footnote_when_not_flagged(client, tmp_db):
+    search_id = repo.create_search("headphones", {"title_keywords": "headphones"}, 250.0)
+    assert "cost-estimate-note" not in client.get(f"/searches/{search_id}").text
+
+
+def test_warning_shows_alongside_listings_not_instead_of_them(client, tmp_db):
+    """A warning is not a failure — the listings are real and still usable."""
+    search_id = repo.create_search("headphones", {"title_keywords": "headphones"}, 250.0)
+    repo.add_listings(search_id, [{
+        "ebay_item_id": "1", "title": "Sony WH-1000XM5", "price": 200.0,
+        "url": "https://www.ebay.com/itm/1", "buying_options": ["BEST_OFFER"],
+        "raw_data": {},
+    }])
+    repo.set_search_warning(search_id, "Seller feedback could not be retrieved.")
+    repo.update_search_status(search_id, "awaiting_selection")
+    body = client.get(f"/searches/{search_id}").text
+    assert "Seller feedback could not be retrieved." in body
+    assert "Sony WH-1000XM5" in body
+
+
+def test_cost_line_shows_discovery_separately(client, tmp_db):
+    search_id = repo.create_search("headphones", {"title_keywords": "headphones"}, 250.0)
+    repo.set_search_cost(search_id, 0.05)
+    body = client.get(f"/searches/{search_id}").text
+    assert "0.05" in body

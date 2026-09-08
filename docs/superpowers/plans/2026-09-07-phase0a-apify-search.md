@@ -30,7 +30,7 @@
 |---|---|
 | `integrations/ebay_search.py` | **New.** Apify-backed listing discovery: `Listing`, `EbaySearchError`, `search_ebay()`, actor input building, output mapping |
 | `browser/ebay.py`, `browser/__init__.py` | **Deleted.** Name means eBay's *Browse API* and collides with `integrations/ebay_browser.py`, the actual Playwright browser |
-| `config.py` | `EBAY_SEARCH_BUDGET_USD` added; `APIFY_BUDGET_USD` raised; `EBAY_APP_ID`/`EBAY_CERT_ID` removed |
+| `config.py` | `EBAY_SEARCH_BUDGET_USD` added; `APIFY_BUDGET_USD` raised. No `EBAY_*` value is removed — the keyset still serves the Trading API |
 | `db/repo.py` | Two column migrations (`searches.search_cost_usd`, `searches.warning_message`), setters, and `sum_total_cost` gaining a third component |
 | `agents/graph.py` | Import swap; `discover` records cost and handles the zero-results and degraded-feedback cases; `reference_prices` passes the remaining budget |
 | `pricing/google_shopping.py` | `max_total_charge_usd` becomes the remaining budget rather than the full one |
@@ -152,7 +152,7 @@ APIFY_BUDGET_USD = float(os.getenv("APIFY_BUDGET_USD", "0.90"))
 EBAY_SEARCH_BUDGET_USD = float(os.getenv("EBAY_SEARCH_BUDGET_USD", "0.15"))
 ```
 
-Delete the `EBAY_APP_ID` and `EBAY_CERT_ID` assignments and their comments. Leave `EBAY_USER_TOKEN` alone — the Trading API still needs it until Phase 0b.
+**Do not delete any `EBAY_*` value.** `EBAY_APP_ID`, `EBAY_CERT_ID`, `EBAY_DEV_ID` and `EBAY_USER_TOKEN` all stay. The keyset serves the Trading API too — `integrations/ebay_trading.py:97-99` sends `EBAY_APP_ID` and `EBAY_CERT_ID` as `X-EBAY-API-APP-NAME` / `X-EBAY-API-CERT-NAME` headers — and the Trading API is out of scope until Phase 0b. Deleting them breaks messaging, offer status, and the reply poller at runtime.
 
 - [ ] **Step 4: Add the column migrations**
 
@@ -1468,7 +1468,7 @@ if __name__ == "__main__":
 
 - [ ] **Step 8: Clean up config docs**
 
-In `.env.example`, delete the `EBAY_APP_ID` and `EBAY_CERT_ID` lines and add:
+In `.env.example`, leave every `EBAY_*` line in place (the keyset still serves the Trading API until Phase 0b) and add:
 
 ```
 # Ceiling for one eBay discovery run (~$0.05 actual). Separate from
@@ -1499,7 +1499,7 @@ git commit -m "feat(search): warning banner, discovery cost line, live smoke scr
 After Task 6, confirm the spec's success criteria hold:
 
 - [ ] `.venv/Scripts/python.exe -m pytest -q` — all green.
-- [ ] `grep -rn "EBAY_APP_ID\|EBAY_CERT_ID" --include=*.py --include=*.example . | grep -v __pycache__` returns nothing.
+- [ ] `grep -rn "EBAY_APP_ID" integrations/ebay_trading.py config.py` still finds both — the keyset serves the Trading API until Phase 0b.
 - [ ] `grep -rn "from browser\|import browser" --include=*.py . | grep -v __pycache__` returns nothing.
 - [ ] `grep -rn "EBAY_USER_TOKEN" config.py` still finds it — Phase 0b removes it, not this plan.
 - [ ] **Live**: `.venv/Scripts/python.exe scratch_ebay_search.py "sony wh-1000xm5" --max-price 250` returns real listings, reports a cost near $0.05, and lists no absent fields. This is the only check that validates the mapping against the real actor.
@@ -1507,7 +1507,7 @@ After Task 6, confirm the spec's success criteria hold:
 
 ## Notes for the executor
 
-- **Do not delete `integrations/ebay_trading.py`, `api/routes/ebay_notifications.py`, or the `/ebay/account-deletion` entry in `EXEMPT_PATHS`.** They look like dead weight after this plan and are not — Phase 0b removes them.
+- **Do not delete `integrations/ebay_trading.py`, `api/routes/ebay_notifications.py`, the `/ebay/account-deletion` entry in `EXEMPT_PATHS`, or ANY `EBAY_*` config value.** They look like dead weight after this plan and are not — Phase 0b removes them together. `EBAY_APP_ID`/`EBAY_CERT_ID` in particular are not Browse-API-only: `integrations/ebay_trading.py:97-99` sends them as Trading API headers.
 - **`condition_floor` is a floor.** `"used"` sends no condition filter. If you find yourself mapping `"used"` to `"3000"`, stop: that silently excludes every new listing.
 - **`EBAY_SEARCH_BUDGET_USD` must not be replaced by `APIFY_BUDGET_USD`.** They look redundant and are not; the broker debits friends whichever ceiling is declared.
 - **Task 3 deviates from spec §3** on the return type, for the reason stated in that task. Everything else follows the spec as written.

@@ -68,3 +68,14 @@ def test_templates_and_static_stay_pinned_to_repo_root(reloaded_config, monkeypa
     cfg = reloaded_config()
     assert cfg.TEMPLATES_DIR == cfg.ROOT_DIR / "templates"
     assert cfg.STATIC_DIR == cfg.ROOT_DIR / "static"
+
+
+def test_ebay_search_budget_default():
+    assert config_module.EBAY_SEARCH_BUDGET_USD == 0.15
+
+
+def test_apify_budget_default_covers_discovery_plus_pricing():
+    # Google Shopping costs ~$0.49 and discovery up to $0.15 (the actor has no
+    # result cap, so a broad query reaches its ceiling); the combined cap must
+    # clear both or cost_guard blocks reference pricing on every search.
+    assert config_module.APIFY_BUDGET_USD >= 0.60

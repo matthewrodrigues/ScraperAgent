@@ -17,7 +17,7 @@ from langgraph.graph import END, START, StateGraph
 
 from agents.criteria_parser import ParsedCriteria
 from agents.negotiate import NegotiationDraftError, draft_message
-from browser.ebay import EbaySearchError, search_ebay
+from integrations.ebay_search import EbaySearchError, search_ebay
 from db import repo
 from pricing import aggregator, cost_guard, google_shopping
 from pricing.google_shopping import PricingSourceError
@@ -55,25 +55,49 @@ def discover(state: SearchState) -> SearchState:
     )
 
     try:
-        listings = search_ebay(criteria, limit=25)
+        result = search_ebay(criteria, limit=25)
     except EbaySearchError as exc:
         log.warning("eBay search failed for search_id=%s: %s", search_id, exc)
         repo.set_search_error(search_id, str(exc))
         repo.update_search_status(search_id, "failed")
         return {"error": str(exc)}
 
-    repo.add_listings(search_id, [l.model_dump() for l in listings])
+    # The run was paid for regardless of what it matched, so record the cost
+    # before any early return.
+    repo.set_search_cost(search_id, result.cost_usd)
+    if result.cost_is_estimate:
+        repo.set_search_costs_are_estimates(search_id)
+
+    if result.warning:
+        repo.set_search_warning(search_id, result.warning)
+
+    if not result.listings:
+        # Best-Offer-only filtering makes empty results common. Reaching
+        # awaiting_selection with nothing to select reads as a broken app, so
+        # end the search with something actionable instead. "failed" is the
+        # mechanism; the message carries the meaning.
+        msg = (
+            "No Best Offer listings matched. This search only returns listings "
+            "where the seller accepts offers — try a wider price range or "
+            "allowing used condition."
+        )
+        log.info("no BO listings for search_id=%s", search_id)
+        repo.set_search_error(search_id, msg)
+        repo.update_search_status(search_id, "failed")
+        return {"error": msg}
+
+    repo.add_listings(search_id, [l.model_dump() for l in result.listings])
     # Status stays at 'discovering' — reference_prices node flips it to
     # 'awaiting_selection' when both nodes have completed.
     return {}
 
 
-# Rough pre-flight cost estimate. Actual spend is read back from the run and
-# recorded; this is just the guardrail check before launching the actor.
-# Real-world: burbn/google-shopping-scraper costs ~$0.49 per run for 25 results,
-# which sits right at the $0.50 APIFY_BUDGET_USD cap. Plenty of headroom *per
-# search* but means adding more sources will require either expanding the budget
-# or switching to a cheaper actor.
+# Expected cost of a Google Shopping run (~$0.49 for 25 results), used only for
+# the pre-flight "is it even worth trying" check below. The ceiling actually
+# enforced on the actor call is `cost_guard.remaining_budget`, which accounts
+# for whatever this search has already spent (discovery included) — that's
+# what makes the budget a real per-search cap rather than an estimate we check
+# and then exceed (spec 6.1).
 _REF_PRICES_PLANNED_COST_USD = 0.50
 
 
@@ -86,6 +110,18 @@ def reference_prices(state: SearchState) -> SearchState:
     """
     search_id = state["search_id"]
 
+    # discover() may already have marked this search 'failed' (eBay error, or
+    # zero Best-Offer matches). Read the status from the DB row rather than
+    # graph state — LangGraph's state merging between nodes is not a reliable
+    # signal here. Bail before the cost guard so a failed search spends
+    # nothing further on reference pricing, and so the 'failed' status (with
+    # its explanatory message) survives to the dashboard instead of being
+    # overwritten by the unconditional 'awaiting_selection' writes below.
+    row = repo.get_search(search_id)
+    if row and row["status"] == "failed":
+        return {}
+
+    remaining = cost_guard.remaining_budget(search_id)
     if not cost_guard.under_budget(search_id, _REF_PRICES_PLANNED_COST_USD):
         log.warning("Apify budget cap reached for search_id=%s; skipping ref-prices", search_id)
         repo.update_search_status(search_id, "awaiting_selection")
@@ -102,11 +138,16 @@ def reference_prices(state: SearchState) -> SearchState:
     )
 
     try:
-        price_points, cost_usd = google_shopping.fetch(criteria)
+        price_points, cost_usd, cost_is_estimate = google_shopping.fetch(
+            criteria, max_charge_usd=remaining
+        )
     except PricingSourceError as exc:
         log.warning("google_shopping failed for search_id=%s: %s", search_id, exc)
         repo.update_search_status(search_id, "awaiting_selection")
         return {}
+
+    if cost_is_estimate:
+        repo.set_search_costs_are_estimates(search_id)
 
     buckets = aggregator.by_condition(price_points)
     # Spread the run cost across the per-condition rows we'll write. Trivial

@@ -20,7 +20,6 @@ from typing import Any
 
 from apify_client import ApifyClient
 
-import config
 from agents.criteria_parser import ParsedCriteria
 from integrations import clients
 
@@ -55,11 +54,19 @@ def _get_client() -> ApifyClient:
     return _client
 
 
-def fetch(criteria: ParsedCriteria) -> tuple[list[dict[str, Any]], float]:
-    """Run the actor and return (price_points, cost_usd).
+def fetch(
+    criteria: ParsedCriteria, max_charge_usd: float
+) -> tuple[list[dict[str, Any]], float, bool]:
+    """Run the actor and return (price_points, cost_usd, cost_is_estimate).
 
     `price_points` is a list of dicts: {price, currency, condition, url, title, source_item}.
     Caller is responsible for bucketing/aggregation.
+
+    `max_charge_usd` is required, not defaulted: it must be what the caller has
+    already computed as *remaining* budget for this search (see
+    `pricing.cost_guard.remaining_budget`), not the whole per-search budget —
+    otherwise a single run could be authorised to spend the entire budget on
+    top of whatever this search had already spent (spec 6.1).
     """
     client = _get_client()
 
@@ -76,9 +83,10 @@ def fetch(criteria: ParsedCriteria) -> tuple[list[dict[str, Any]], float]:
         run = client.actor(_ACTOR_ID).call(
             run_input=run_input,
             wait_duration=timedelta(seconds=_DEFAULT_RUN_TIMEOUT_SECS),
-            # Platform-side cap as a redundant safety net on top of our cost_guard.
-            # SDK rejects the call before launch if estimated cost exceeds this.
-            max_total_charge_usd=Decimal(str(config.APIFY_BUDGET_USD)),
+            # The caller passes what is LEFT of this search's budget, not the
+            # whole budget. Passing the full budget here let a search spend
+            # past the cap it had just been checked against (spec 6.1).
+            max_total_charge_usd=Decimal(str(max_charge_usd)),
         )
     except Exception as exc:
         # apify-client raises various exceptions for network/auth/timeouts; collapse
@@ -100,13 +108,33 @@ def fetch(criteria: ParsedCriteria) -> tuple[list[dict[str, Any]], float]:
 
     items = list(client.dataset(dataset_id).iterate_items())
     points = _parse_items(items)
-    cost_usd = float(run_d.get("usage_total_usd") or run_d.get("usageUsd") or 0.0)
+    # usage_total_usd is the field name on apify-client's Pydantic Run model
+    # (3.x); usageTotalUsd is the raw camelCase key some older mocks/dicts
+    # use. Keep this fallback order in sync with the equivalent lookup in
+    # integrations/ebay_search.py.
+    #
+    # Apify's usage figure can settle after a run first reports SUCCEEDED, so
+    # a charged run can report 0 here. Falling back to 0.0 would UNDER-record
+    # cost, which is exactly what cost_guard.spent_so_far must never do.
+    # Fall back to the caller-supplied ceiling instead: it is, by
+    # construction, >= actual cost.
+    reported_cost = run_d.get("usage_total_usd") or run_d.get("usageTotalUsd")
+    cost_is_estimate = not reported_cost
+    if cost_is_estimate:
+        cost_usd = max_charge_usd
+        log.warning(
+            "google_shopping: run reported no settled usage; recording the "
+            "declared ceiling $%.4f as an estimate instead of $0.0",
+            cost_usd,
+        )
+    else:
+        cost_usd = float(reported_cost)
 
     log.info(
         "google_shopping: %d items parsed (from %d raw) at cost $%.4f",
         len(points), len(items), cost_usd,
     )
-    return points, cost_usd
+    return points, cost_usd, cost_is_estimate
 
 
 def _parse_items(items: list[dict[str, Any]]) -> list[dict[str, Any]]:

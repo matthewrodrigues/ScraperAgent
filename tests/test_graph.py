@@ -10,7 +10,7 @@ from unittest.mock import patch
 import pytest
 
 from agents import graph
-from browser.ebay import EbaySearchError, Listing
+from integrations.ebay_search import EbaySearchError, Listing
 from db import repo
 from pricing.google_shopping import PricingSourceError
 
@@ -53,7 +53,7 @@ def test_discover_happy_path_persists_listings(tmp_db):
     search_id = _make_search()
     fake_listings = [_listing(ebay_item_id=f"v1|{i}|0") for i in range(3)]
 
-    with patch("agents.graph.search_ebay", return_value=fake_listings) as mock_search:
+    with patch("agents.graph.search_ebay", return_value=_result(fake_listings)) as mock_search:
         result = graph.discover({"search_id": search_id})
 
     # search_ebay called with criteria built from the persisted search row
@@ -68,6 +68,39 @@ def test_discover_happy_path_persists_listings(tmp_db):
     assert len(repo.list_listings(search_id)) == 3
     assert repo.get_search(search_id)["status"] == "discovering"
     assert result.get("error") is None
+
+
+def test_discover_estimate_flag_sets_costs_are_estimates(tmp_db):
+    search_id = _make_search()
+    with patch(
+        "agents.graph.search_ebay",
+        return_value=_result([_listing()], cost_usd=0.15, cost_is_estimate=True),
+    ):
+        graph.discover({"search_id": search_id})
+
+    assert repo.get_search(search_id)["costs_are_estimates"] == 1
+
+
+def test_discover_zero_settled_usage_regression_shrinks_remaining_budget(tmp_db, monkeypatch):
+    """Pins the actual production bug: a discovery run that reported zero
+    settled usage must still be recorded as spend. Before the fix, cost_usd
+    fell back to 0.0, so cost_guard.remaining_budget(search_id) read the full
+    APIFY_BUDGET_USD even after a real, charged discovery run — letting
+    reference pricing launch with a ceiling higher than the true remaining
+    budget. After the fix the ceiling fallback records real spend, so
+    remaining_budget must be strictly less than the configured budget."""
+    import config as _config
+    from pricing import cost_guard
+
+    monkeypatch.setattr(_config, "APIFY_BUDGET_USD", 0.90)
+    search_id = _make_search()
+    with patch(
+        "agents.graph.search_ebay",
+        return_value=_result([_listing()], cost_usd=0.15, cost_is_estimate=True),
+    ):
+        graph.discover({"search_id": search_id})
+
+    assert cost_guard.remaining_budget(search_id) < _config.APIFY_BUDGET_USD
 
 
 def test_discover_ebay_error_sets_failed_status_and_records_message(tmp_db):
@@ -89,7 +122,7 @@ def test_discover_passes_max_price_from_search_row_when_missing_in_structured(tm
     structured = {"title_keywords": "x", "must_not_keywords": [], "condition_floor": None, "min_seller_rating": None}
     search_id = repo.create_search(criteria_nl="x", criteria_structured=structured, max_price=75.0)
 
-    with patch("agents.graph.search_ebay", return_value=[]) as mock_search:
+    with patch("agents.graph.search_ebay", return_value=_result([])) as mock_search:
         graph.discover({"search_id": search_id})
 
     criteria_arg = mock_search.call_args.args[0]
@@ -104,7 +137,7 @@ def test_discover_flips_status_to_discovering_before_calling_ebay(tmp_db):
 
     def _snapshot_status(*args, **kwargs):
         snapshot["status"] = repo.get_search(search_id)["status"]
-        return []
+        return _result([])
 
     with patch("agents.graph.search_ebay", side_effect=_snapshot_status):
         graph.discover({"search_id": search_id})
@@ -115,11 +148,63 @@ def test_discover_flips_status_to_discovering_before_calling_ebay(tmp_db):
 def test_compiled_graph_runs_end_to_end(tmp_db):
     """Smoke test: compile the graph and invoke it — proves the wiring works."""
     search_id = _make_search()
-    with patch("agents.graph.search_ebay", return_value=[_listing()]), \
-         patch("agents.graph.google_shopping.fetch", return_value=([], 0.02)):
+    with patch("agents.graph.search_ebay", return_value=_result([_listing()])), \
+         patch("agents.graph.google_shopping.fetch", return_value=([], 0.02, False)):
         compiled = graph.build_graph()
         compiled.invoke({"search_id": search_id})
     assert repo.get_search(search_id)["status"] == "awaiting_selection"
+
+
+def test_compiled_graph_zero_results_stays_failed_with_message(tmp_db):
+    """H1 regression test. discover() marks a zero-Best-Offer-match search
+    'failed' with an explanatory message; reference_prices must not overwrite
+    that with 'awaiting_selection' when the whole graph runs end to end. This
+    must exercise the COMPILED graph, not discover() in isolation — that
+    isolation is exactly what let the original bug through six reviews.
+
+    google_shopping.fetch is intentionally NOT mocked to succeed here: if
+    reference_prices's early-return regresses, this test would otherwise
+    pass anyway on network/credential failure inside fetch. Failing fetch
+    loudly (not via PricingSourceError) makes a regression here impossible
+    to miss."""
+    search_id = _make_search()
+    with patch("agents.graph.search_ebay", return_value=_result([])), \
+         patch(
+             "agents.graph.google_shopping.fetch",
+             side_effect=AssertionError(
+                 "reference_prices should have early-returned before calling "
+                 "google_shopping.fetch on an already-failed search"
+             ),
+         ):
+        compiled = graph.build_graph()
+        compiled.invoke({"search_id": search_id})
+
+    row = repo.get_search(search_id)
+    assert row["status"] == "failed"
+    assert "best offer" in row["error_message"].lower()
+    # Reference pricing must not have spent anything on a failed search.
+    assert repo.list_reference_prices(search_id) == []
+
+
+def test_compiled_graph_ebay_search_error_stays_failed_with_message(tmp_db):
+    """H1 regression test, EbaySearchError path (predates Phase 0a but is
+    the same defect). Must run the compiled graph end to end."""
+    search_id = _make_search()
+    with patch("agents.graph.search_ebay", side_effect=EbaySearchError("eBay returned 503")), \
+         patch(
+             "agents.graph.google_shopping.fetch",
+             side_effect=AssertionError(
+                 "reference_prices should have early-returned before calling "
+                 "google_shopping.fetch on an already-failed search"
+             ),
+         ):
+        compiled = graph.build_graph()
+        compiled.invoke({"search_id": search_id})
+
+    row = repo.get_search(search_id)
+    assert row["status"] == "failed"
+    assert "503" in row["error_message"]
+    assert repo.list_reference_prices(search_id) == []
 
 
 # ---------- reference_prices node ----------
@@ -131,7 +216,7 @@ def test_reference_prices_persists_aggregates_and_flips_status(tmp_db):
         {"price": 270.0, "condition": "new", "url": "u2", "title": "t2", "currency": "USD"},
         {"price": 290.0, "condition": "new", "url": "u3", "title": "t3", "currency": "USD"},
     ]
-    with patch("agents.graph.google_shopping.fetch", return_value=(fake_points, 0.05)):
+    with patch("agents.graph.google_shopping.fetch", return_value=(fake_points, 0.05, False)):
         graph.reference_prices({"search_id": search_id})
 
     rows = repo.list_reference_prices(search_id)
@@ -149,7 +234,7 @@ def test_reference_prices_groups_new_and_used_into_separate_rows(tmp_db):
         {"price": 200.0, "condition": "new", "url": "u1", "title": "t1", "currency": "USD"},
         {"price": 150.0, "condition": "used", "url": "u2", "title": "t2", "currency": "USD"},
     ]
-    with patch("agents.graph.google_shopping.fetch", return_value=(points, 0.04)):
+    with patch("agents.graph.google_shopping.fetch", return_value=(points, 0.04, False)):
         graph.reference_prices({"search_id": search_id})
 
     rows = repo.list_reference_prices(search_id)
@@ -189,8 +274,81 @@ def test_reference_prices_skips_when_budget_exhausted(tmp_db, monkeypatch):
 def test_reference_prices_empty_results_still_flips_status(tmp_db):
     """Actor returns zero items (e.g. obscure query) — node still finishes cleanly."""
     search_id = _make_search()
-    with patch("agents.graph.google_shopping.fetch", return_value=([], 0.01)):
+    with patch("agents.graph.google_shopping.fetch", return_value=([], 0.01, False)):
         graph.reference_prices({"search_id": search_id})
 
     assert repo.list_reference_prices(search_id) == []
     assert repo.get_search(search_id)["status"] == "awaiting_selection"
+
+
+from integrations import ebay_search as _ebay_search_mod
+
+
+def _result(listings, cost_usd=0.05, warning=None, cost_is_estimate=False):
+    return _ebay_search_mod.SearchResult(
+        listings=listings, cost_usd=cost_usd, warning=warning,
+        cost_is_estimate=cost_is_estimate,
+    )
+
+
+def _bo_listing(item_id="1", price=200.0, rating=99.5):
+    return _ebay_search_mod.Listing(
+        ebay_item_id=item_id, title=f"Listing {item_id}", price=price,
+        url=f"https://www.ebay.com/itm/{item_id}", seller_rating=rating,
+        buying_options=["BEST_OFFER"], raw_data={},
+    )
+
+
+def test_discover_records_the_run_cost(tmp_db):
+    search_id = repo.create_search("headphones", {"title_keywords": "headphones"}, 250.0)
+    with patch("agents.graph.search_ebay", return_value=_result([_bo_listing()], cost_usd=0.052)):
+        graph.discover({"search_id": search_id})
+    assert repo.get_search(search_id)["search_cost_usd"] == pytest.approx(0.052)
+
+
+def test_discover_stores_listings(tmp_db):
+    search_id = repo.create_search("headphones", {"title_keywords": "headphones"}, 250.0)
+    with patch("agents.graph.search_ebay", return_value=_result([_bo_listing("1"), _bo_listing("2")])):
+        graph.discover({"search_id": search_id})
+    assert len(repo.list_listings(search_id)) == 2
+
+
+def test_discover_surfaces_the_degraded_feedback_warning(tmp_db):
+    search_id = repo.create_search("headphones", {"title_keywords": "headphones"}, 250.0)
+    warning = _ebay_search_mod.WARNING_NO_SELLER_FEEDBACK
+    with patch("agents.graph.search_ebay", return_value=_result([_bo_listing()], warning=warning)):
+        graph.discover({"search_id": search_id})
+    row = repo.get_search(search_id)
+    assert row["warning_message"] == warning
+    # A warning is not a failure — the listings are real and still usable.
+    assert row["status"] != "failed"
+    assert row["error_message"] is None
+
+
+def test_zero_results_explains_best_offer_filtering(tmp_db):
+    """Filtering to Best-Offer-only makes empty results common. Landing in
+    awaiting_selection with nothing to select reads as a broken app."""
+    search_id = repo.create_search("headphones", {"title_keywords": "headphones"}, 250.0)
+    with patch("agents.graph.search_ebay", return_value=_result([])):
+        graph.discover({"search_id": search_id})
+    row = repo.get_search(search_id)
+    assert row["status"] == "failed"
+    assert "best offer" in row["error_message"].lower()
+
+
+def test_zero_results_still_records_the_cost(tmp_db):
+    """The run was paid for whether or not it matched anything."""
+    search_id = repo.create_search("headphones", {"title_keywords": "headphones"}, 250.0)
+    with patch("agents.graph.search_ebay", return_value=_result([], cost_usd=0.048)):
+        graph.discover({"search_id": search_id})
+    assert repo.get_search(search_id)["search_cost_usd"] == pytest.approx(0.048)
+
+
+def test_search_error_marks_the_search_failed(tmp_db):
+    search_id = repo.create_search("headphones", {"title_keywords": "headphones"}, 250.0)
+    err = _ebay_search_mod.EbaySearchError("Your monthly search budget is used up.")
+    with patch("agents.graph.search_ebay", side_effect=err):
+        graph.discover({"search_id": search_id})
+    row = repo.get_search(search_id)
+    assert row["status"] == "failed"
+    assert "budget" in row["error_message"].lower()

@@ -189,3 +189,13 @@ tbody tr:last-child td { border-bottom: none; }
     cursor: pointer;
 }
 .logout-form button:hover { color: var(--accent); }
+
+/* Non-fatal notice: the search worked, but something degraded and the user
+   should know before acting. Amber rather than the error banner's red. */
+.warning-banner {
+    background: #fff8e1;
+    border-left: 4px solid #f0ad4e;
+    padding: 0.75rem 1rem;
+    margin: 1rem 0;
+    border-radius: 4px;
+}

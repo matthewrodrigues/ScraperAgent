@@ -21,7 +21,7 @@ def main() -> None:
     )
     print(f"Calling Apify actor {google_shopping._ACTOR_ID}...")
     try:
-        points, cost = google_shopping.fetch(criteria)
+        points, cost, cost_is_estimate = google_shopping.fetch(criteria, max_charge_usd=0.90)
     except google_shopping.PricingSourceError as exc:
         print(f"\nFAILED with PricingSourceError: {exc}")
         traceback.print_exc()

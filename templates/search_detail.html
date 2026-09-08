@@ -26,7 +26,7 @@
 
         <dt>Min seller rating</dt>
         <dd>
-            {% set msr = search.criteria_structured.min_seller_rating %}
+            {% set msr = search.criteria_structured.get('min_seller_rating') %}
             {{ "%.1f%%"|format(msr) if msr is not none else "—" }}
         </dd>
     </dl>

@@ -15,7 +15,7 @@ This is v1: eBay only, run from a local dashboard while the process is open.
    into structured fields you can edit before launching.
 2. Discovers reference prices (currently Google Shopping via Apify, with more
    retail sources scaffolded) to establish a fair-market median for the item.
-3. Searches eBay via the Browse API and ranks candidates by how cheap they are
+3. Searches eBay via an Apify actor and ranks candidates by how cheap they are
    relative to the market median, not just absolute price.
 4. Presents the candidates on a live dashboard. You pick up to 5 to pursue.
 5. For each selected listing, a rules engine picks a negotiation strategy from
@@ -60,9 +60,8 @@ api/
   main.py            FastAPI app, lifespan + middleware wiring, /health and / routes
   auth.py            session-cookie auth: middleware, exempt list, login/logout
   routes/            searches (dashboard + actions), eBay deletion notifications
-browser/
-  ebay.py            eBay Browse API listing search
 integrations/
+  ebay_search.py     eBay listing search, via an Apify actor
   ebay_trading.py    eBay Trading API (messaging, offer status)
   ebay_browser.py    Playwright-driven Best Offer placement
 pricing/
@@ -110,8 +109,10 @@ never computes the offer amount — that is clamped in code to never exceed
 - **Output validation (Pydantic):** every negotiator output is validated before
   it reaches eBay — offer <= `max_price`, message sanity checks, and
   reference-price claims must match the actual reference-price object.
-- **Cost guards:** Apify spend per search is capped (default $0.50) with a
-  pre-flight estimate that aborts an actor before launch if it would breach.
+- **Cost guards:** Apify spend per search is capped at `APIFY_BUDGET_USD`
+  (default $0.90, covering listing discovery plus reference pricing). The cap is
+  enforced by the vendor, not just estimated: each run is launched with a ceiling
+  of whatever remains of the search's budget, so a search cannot spend past it.
   Actual spend is tracked from each run's reported usage.
 
 ## Dashboard authentication
@@ -164,9 +165,12 @@ persistent profile holds the login session, so you authenticate once and the
 agent reuses it. Selectors live at the top of `integrations/ebay_browser.py`
 and need updating whenever eBay redesigns the offer page.
 
-Note: listing *search* still uses the eBay Browse API (a client-credentials
-token from the App ID + Cert ID keypair), which is separate from the
-buyer-scoped account and needs no per-user login.
+Note: listing *search* runs through an Apify actor (`integrations/ebay_search.py`)
+rather than eBay's own Browse API, so it needs no eBay developer credentials
+at all — an invited friend can search without ever registering an eBay
+keyset. The App ID + Cert ID pair is still required, but only for the Trading
+API calls below (messaging, offer status, and the seller-reply poller), which
+are separate from the buyer-scoped account and need no per-user login.
 
 ## Setup
 
@@ -218,8 +222,10 @@ python -m playwright install chrome
 Copy `.env.example` to `.env` and fill it in — it documents every setting the
 app reads, including which are required. Because offers and messaging go through
 Playwright rather than the buyer-scoped eBay APIs, no user OAuth token or refresh
-token is required for placing offers — only the App ID + Cert ID keypair that
-authorizes listing search via the Browse API.
+token is required for placing offers. Listing search runs through Apify and
+needs no eBay developer keyset at all, but the App ID + Cert ID keypair is
+still required for the Trading API — the messaging and offer-status calls,
+and the account-deletion notification eBay's production keysets require.
 
 The minimum to boot:
 
@@ -519,8 +525,9 @@ control for a friend acting in good faith, not a security boundary.
 - Orchestration: LangGraph (`Send` API for fan-out, durable SQLite checkpointing)
 - Negotiation model: Claude Sonnet; criteria parsing: Claude Haiku
 - Marketplace scraping: Apify (`apify-client` SDK, 2.x+ required)
-- eBay: Browse API for listing search; all buyer-side actions (Best Offer
-  placement and seller messaging) driven through Playwright browser automation
+- eBay: an Apify actor for listing search; the Trading API for messaging and
+  offer status; all buyer-side actions (Best Offer placement and seller
+  messaging) driven through Playwright browser automation
 - Web: FastAPI + Jinja2 + HTMX, no JavaScript build pipeline
 - Storage: SQLite
 - Output validation: Pydantic
