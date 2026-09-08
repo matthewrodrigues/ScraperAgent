@@ -6,6 +6,8 @@ is the exempt list: three paths that MUST stay open, and everything else that
 MUST NOT.
 """
 
+from pathlib import Path
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -137,3 +139,19 @@ def test_login_page_does_not_offer_a_logout_control(anon):
     """The login page extends the same base template; a sign-out link there
     would be nonsense at best and confusing at worst."""
     assert "/logout" not in anon.get("/login").text
+
+
+# ---- Database isolation ----
+
+def test_this_module_cannot_reach_the_real_database(anon, tmp_path_factory):
+    """Regression guard: this file's fixtures build a TestClient with no
+    explicit tmp_db request, which is exactly the gap that let these tests hit
+    the real scraperagent.db. tmp_db is autouse now (see conftest.py), so
+    config.DB_PATH must point somewhere under pytest's tmp dir for every test
+    in this module, not at the repo root, whether or not the test asked for
+    tmp_db by name."""
+    pytest_root = tmp_path_factory.getbasetemp()
+    assert config.DB_PATH.resolve().is_relative_to(pytest_root.resolve())
+
+    real_db = Path(__file__).resolve().parent.parent / "scraperagent.db"
+    assert config.DB_PATH.resolve() != real_db.resolve()
