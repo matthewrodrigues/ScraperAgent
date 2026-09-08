@@ -1,8 +1,9 @@
-"""Tests for the Chrome-profile backup script.
+"""Tests for the backup script.
 
-The profile directory holds the agent's eBay login session. It cannot be
-regenerated without a manual, 2FA-gated sign-in, which makes it the one piece
-of local state whose loss actually costs the user something.
+The Chrome profile directory holds the agent's eBay login session; it cannot
+be regenerated without a manual, 2FA-gated sign-in. The database holds
+negotiation transcripts, seller replies, offer history, and per-search cost
+records; it also cannot be regenerated. Both are backed up here.
 """
 
 import zipfile
@@ -10,7 +11,7 @@ from datetime import datetime
 
 import pytest
 
-from scripts.backup_profile import BackupError, backup_profile, prune_backups
+from scripts.backup_profile import DB_ARCNAME, BackupError, backup_profile, prune_backups
 
 
 @pytest.fixture
@@ -114,3 +115,51 @@ def test_backup_prunes_as_part_of_a_normal_run(profile, backup_dir):
     for i in range(5):
         backup_profile(profile, backup_dir, keep=2, now=datetime(2026, 9, 1 + i, 12, 0, 0))
     assert len(list(backup_dir.glob("*.zip"))) == 2
+
+
+# ---- Database inclusion ----
+
+def test_backup_includes_the_database_when_one_exists(profile, backup_dir, tmp_path):
+    db_path = tmp_path / "scraperagent.db"
+    db_path.write_bytes(b"not-really-sqlite-but-nonempty")
+
+    archive = backup_profile(profile, backup_dir, db_path=db_path)
+
+    with zipfile.ZipFile(archive) as z:
+        assert DB_ARCNAME in z.namelist()
+        assert z.read(DB_ARCNAME) == b"not-really-sqlite-but-nonempty"
+        # The profile is still backed up too.
+        assert "Default/Cookies" in z.namelist()
+
+
+def test_backup_succeeds_with_a_warning_when_the_database_is_missing(profile, backup_dir, tmp_path, caplog):
+    db_path = tmp_path / "does-not-exist.db"
+
+    with caplog.at_level("WARNING"):
+        archive = backup_profile(profile, backup_dir, db_path=db_path)
+
+    assert "not found" in caplog.text
+    with zipfile.ZipFile(archive) as z:
+        assert DB_ARCNAME not in z.namelist()
+        assert "Default/Cookies" in z.namelist()
+
+
+def test_backup_succeeds_with_a_warning_when_the_database_is_empty(profile, backup_dir, tmp_path, caplog):
+    db_path = tmp_path / "scraperagent.db"
+    db_path.write_bytes(b"")
+
+    with caplog.at_level("WARNING"):
+        archive = backup_profile(profile, backup_dir, db_path=db_path)
+
+    assert "zero-length" in caplog.text
+    with zipfile.ZipFile(archive) as z:
+        assert DB_ARCNAME not in z.namelist()
+        assert "Default/Cookies" in z.namelist()
+
+
+def test_backup_without_a_db_path_omits_the_database_entirely(profile, backup_dir):
+    """Callers that don't pass db_path (e.g. older scripts, or a caller only
+    interested in the profile) still get exactly the old behavior."""
+    archive = backup_profile(profile, backup_dir)
+    with zipfile.ZipFile(archive) as z:
+        assert DB_ARCNAME not in z.namelist()
