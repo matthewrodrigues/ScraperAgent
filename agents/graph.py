@@ -17,7 +17,7 @@ from langgraph.graph import END, START, StateGraph
 
 from agents.criteria_parser import ParsedCriteria
 from agents.negotiate import NegotiationDraftError, draft_message
-from browser.ebay import EbaySearchError, search_ebay
+from integrations.ebay_search import EbaySearchError, search_ebay
 from db import repo
 from pricing import aggregator, cost_guard, google_shopping
 from pricing.google_shopping import PricingSourceError
@@ -55,14 +55,36 @@ def discover(state: SearchState) -> SearchState:
     )
 
     try:
-        listings = search_ebay(criteria, limit=25)
+        result = search_ebay(criteria, limit=25)
     except EbaySearchError as exc:
         log.warning("eBay search failed for search_id=%s: %s", search_id, exc)
         repo.set_search_error(search_id, str(exc))
         repo.update_search_status(search_id, "failed")
         return {"error": str(exc)}
 
-    repo.add_listings(search_id, [l.model_dump() for l in listings])
+    # The run was paid for regardless of what it matched, so record the cost
+    # before any early return.
+    repo.set_search_cost(search_id, result.cost_usd)
+
+    if result.warning:
+        repo.set_search_warning(search_id, result.warning)
+
+    if not result.listings:
+        # Best-Offer-only filtering makes empty results common. Reaching
+        # awaiting_selection with nothing to select reads as a broken app, so
+        # end the search with something actionable instead. "failed" is the
+        # mechanism; the message carries the meaning.
+        msg = (
+            "No Best Offer listings matched. This search only returns listings "
+            "where the seller accepts offers — try a wider price range or "
+            "allowing used condition."
+        )
+        log.info("no BO listings for search_id=%s", search_id)
+        repo.set_search_error(search_id, msg)
+        repo.update_search_status(search_id, "failed")
+        return {"error": msg}
+
+    repo.add_listings(search_id, [l.model_dump() for l in result.listings])
     # Status stays at 'discovering' — reference_prices node flips it to
     # 'awaiting_selection' when both nodes have completed.
     return {}

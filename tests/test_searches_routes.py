@@ -7,8 +7,28 @@ from fastapi.testclient import TestClient
 
 from agents.criteria_parser import ParsedCriteria
 from api.main import app
+from integrations.ebay_search import Listing, SearchResult
 from integrations.ebay_trading import EbayTradingError, NoPartnerRelationshipError
 from tests.conftest import TEST_DASHBOARD_PASSWORD
+
+# integrations.ebay_search.search_ebay now returns a SearchResult, not a bare
+# list of listings. Zero listings is treated as a failed search (see
+# agents/graph.py discover()), so route tests that only care about
+# persistence/redirect/field-coercion behavior use a single fake listing to
+# stay on the successful path.
+_FAKE_SEARCH_RESULT = SearchResult(
+    listings=[
+        Listing(
+            ebay_item_id="v1|1|0",
+            title="Fake Listing",
+            price=100.0,
+            url="https://www.ebay.com/itm/1",
+            buying_options=["BEST_OFFER"],
+            raw_data={},
+        )
+    ],
+    cost_usd=0.0,
+)
 
 
 @pytest.fixture
@@ -70,7 +90,7 @@ from db import repo
 
 
 @patch("agents.graph.google_shopping.fetch", return_value=([], 0.0))
-@patch("agents.graph.search_ebay", return_value=[])
+@patch("agents.graph.search_ebay", return_value=_FAKE_SEARCH_RESULT)
 def test_post_searches_persists_and_redirects(_mock_ebay, _mock_gshop, client):
     resp = client.post(
         "/searches",
@@ -96,7 +116,7 @@ def test_post_searches_persists_and_redirects(_mock_ebay, _mock_gshop, client):
     assert row["criteria_structured"]["must_not_keywords"] == ["cracked", "broken"]
     assert row["criteria_structured"]["title_keywords"] == "iPhone 13 mini red 128GB"
     assert row["criteria_structured"]["condition_floor"] == "used"
-    # Graph ran end-to-end on submit; with zero listings we still flip status.
+    # Graph ran end-to-end on submit.
     assert row["status"] == "awaiting_selection"
 
 
@@ -117,7 +137,7 @@ def test_post_searches_missing_max_price_returns_400(client):
 
 
 @patch("agents.graph.google_shopping.fetch", return_value=([], 0.0))
-@patch("agents.graph.search_ebay", return_value=[])
+@patch("agents.graph.search_ebay", return_value=_FAKE_SEARCH_RESULT)
 def test_post_searches_empty_condition_floor_treated_as_null(_mock_ebay, _mock_gshop, client):
     """Form sends `condition_floor=""` for "any" — we must coerce to None."""
     resp = client.post(
