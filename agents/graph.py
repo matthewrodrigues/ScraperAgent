@@ -90,12 +90,12 @@ def discover(state: SearchState) -> SearchState:
     return {}
 
 
-# Rough pre-flight cost estimate. Actual spend is read back from the run and
-# recorded; this is just the guardrail check before launching the actor.
-# Real-world: burbn/google-shopping-scraper costs ~$0.49 per run for 25 results,
-# which sits right at the $0.50 APIFY_BUDGET_USD cap. Plenty of headroom *per
-# search* but means adding more sources will require either expanding the budget
-# or switching to a cheaper actor.
+# Expected cost of a Google Shopping run (~$0.49 for 25 results), used only for
+# the pre-flight "is it even worth trying" check below. The ceiling actually
+# enforced on the actor call is `cost_guard.remaining_budget`, which accounts
+# for whatever this search has already spent (discovery included) — that's
+# what makes the budget a real per-search cap rather than an estimate we check
+# and then exceed (spec 6.1).
 _REF_PRICES_PLANNED_COST_USD = 0.50
 
 
@@ -108,6 +108,7 @@ def reference_prices(state: SearchState) -> SearchState:
     """
     search_id = state["search_id"]
 
+    remaining = cost_guard.remaining_budget(search_id)
     if not cost_guard.under_budget(search_id, _REF_PRICES_PLANNED_COST_USD):
         log.warning("Apify budget cap reached for search_id=%s; skipping ref-prices", search_id)
         repo.update_search_status(search_id, "awaiting_selection")
@@ -124,7 +125,7 @@ def reference_prices(state: SearchState) -> SearchState:
     )
 
     try:
-        price_points, cost_usd = google_shopping.fetch(criteria)
+        price_points, cost_usd = google_shopping.fetch(criteria, max_charge_usd=remaining)
     except PricingSourceError as exc:
         log.warning("google_shopping failed for search_id=%s: %s", search_id, exc)
         repo.update_search_status(search_id, "awaiting_selection")

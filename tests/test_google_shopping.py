@@ -39,7 +39,9 @@ def test_fetch_returns_parsed_points_and_cost(configured):
     ]
     fake_client = _mock_client(_make_run(usage=0.04), items)
     with patch("pricing.google_shopping.ApifyClient", return_value=fake_client):
-        points, cost = google_shopping.fetch(ParsedCriteria(title_keywords="headphones", max_price=300.0))
+        points, cost = google_shopping.fetch(
+            ParsedCriteria(title_keywords="headphones", max_price=300.0), max_charge_usd=0.50
+        )
 
     assert cost == 0.04
     assert [p["price"] for p in points] == [278.99, 249.5]
@@ -49,7 +51,9 @@ def test_fetch_returns_parsed_points_and_cost(configured):
 def test_fetch_sends_search_query_country_language_limit(configured):
     fake_client = _mock_client(_make_run(), [])
     with patch("pricing.google_shopping.ApifyClient", return_value=fake_client):
-        google_shopping.fetch(ParsedCriteria(title_keywords="sony wh-1000xm5", max_price=250.0))
+        google_shopping.fetch(
+            ParsedCriteria(title_keywords="sony wh-1000xm5", max_price=250.0), max_charge_usd=0.50
+        )
 
     call_kwargs = fake_client.actor.return_value.call.call_args.kwargs
     run_input = call_kwargs["run_input"]
@@ -63,7 +67,7 @@ def test_fetch_sends_search_query_country_language_limit(configured):
 def test_fetch_omits_max_price_when_none(configured):
     fake_client = _mock_client(_make_run(), [])
     with patch("pricing.google_shopping.ApifyClient", return_value=fake_client):
-        google_shopping.fetch(ParsedCriteria(title_keywords="x", max_price=None))
+        google_shopping.fetch(ParsedCriteria(title_keywords="x", max_price=None), max_charge_usd=0.50)
     run_input = fake_client.actor.return_value.call.call_args.kwargs["run_input"]
     assert "maxPrice" not in run_input
 
@@ -71,7 +75,7 @@ def test_fetch_omits_max_price_when_none(configured):
 def test_fetch_uses_correct_actor_id(configured):
     fake_client = _mock_client(_make_run(), [])
     with patch("pricing.google_shopping.ApifyClient", return_value=fake_client):
-        google_shopping.fetch(ParsedCriteria(title_keywords="x"))
+        google_shopping.fetch(ParsedCriteria(title_keywords="x"), max_charge_usd=0.50)
     fake_client.actor.assert_called_once_with("burbn/google-shopping-scraper")
 
 
@@ -83,7 +87,7 @@ def test_fetch_drops_items_without_price(configured):
     ]
     fake_client = _mock_client(_make_run(), items)
     with patch("pricing.google_shopping.ApifyClient", return_value=fake_client):
-        points, _ = google_shopping.fetch(ParsedCriteria(title_keywords="x"))
+        points, _ = google_shopping.fetch(ParsedCriteria(title_keywords="x"), max_charge_usd=0.50)
     assert [p["title"] for p in points] == ["with price"]
 
 
@@ -91,7 +95,7 @@ def test_fetch_extracts_price_from_string(configured):
     items = [{"title": "x", "price": "$278.99"}]
     fake_client = _mock_client(_make_run(), items)
     with patch("pricing.google_shopping.ApifyClient", return_value=fake_client):
-        points, _ = google_shopping.fetch(ParsedCriteria(title_keywords="x"))
+        points, _ = google_shopping.fetch(ParsedCriteria(title_keywords="x"), max_charge_usd=0.50)
     assert points[0]["price"] == 278.99
 
 
@@ -100,7 +104,7 @@ def test_fetch_raises_when_run_not_succeeded(configured):
     fake_client = _mock_client(_make_run(status="FAILED"), items)
     with patch("pricing.google_shopping.ApifyClient", return_value=fake_client):
         with pytest.raises(google_shopping.PricingSourceError):
-            google_shopping.fetch(ParsedCriteria(title_keywords="x"))
+            google_shopping.fetch(ParsedCriteria(title_keywords="x"), max_charge_usd=0.50)
 
 
 def test_fetch_raises_when_client_raises(configured):
@@ -108,7 +112,7 @@ def test_fetch_raises_when_client_raises(configured):
     client.actor.return_value.call.side_effect = RuntimeError("network down")
     with patch("pricing.google_shopping.ApifyClient", return_value=client):
         with pytest.raises(google_shopping.PricingSourceError) as exc_info:
-            google_shopping.fetch(ParsedCriteria(title_keywords="x"))
+            google_shopping.fetch(ParsedCriteria(title_keywords="x"), max_charge_usd=0.50)
     assert "network down" in str(exc_info.value)
 
 
@@ -117,7 +121,7 @@ def test_fetch_raises_when_token_missing(monkeypatch):
     monkeypatch.setattr(config, "BROKER_URL", "")
     monkeypatch.setattr(config, "BROKER_TOKEN", "")
     with pytest.raises(google_shopping.PricingSourceError) as exc_info:
-        google_shopping.fetch(ParsedCriteria(title_keywords="x"))
+        google_shopping.fetch(ParsedCriteria(title_keywords="x"), max_charge_usd=0.50)
     assert "APIFY_TOKEN" in str(exc_info.value)
     assert "BROKER" in str(exc_info.value)
 
@@ -141,5 +145,18 @@ def test_condition_defaults_to_new_when_absent(configured):
     items = [{"title": "x", "price": 100.0}]
     fake_client = _mock_client(_make_run(), items)
     with patch("pricing.google_shopping.ApifyClient", return_value=fake_client):
-        points, _ = google_shopping.fetch(ParsedCriteria(title_keywords="x"))
+        points, _ = google_shopping.fetch(ParsedCriteria(title_keywords="x"), max_charge_usd=0.50)
     assert points[0]["condition"] == "new"
+
+
+def test_ceiling_is_the_caller_supplied_remaining_budget(configured):
+    """Regression guard for spec 6.1: passing the FULL budget as the ceiling
+    let a search exceed the cap it had just been checked against."""
+    fake_client = _mock_client(_make_run(), [])
+    with patch("pricing.google_shopping.ApifyClient", return_value=fake_client):
+        google_shopping.fetch(
+            ParsedCriteria(title_keywords="headphones", max_price=300.0),
+            max_charge_usd=0.31,
+        )
+    kwargs = fake_client.actor.return_value.call.call_args.kwargs
+    assert float(kwargs["max_total_charge_usd"]) == pytest.approx(0.31)

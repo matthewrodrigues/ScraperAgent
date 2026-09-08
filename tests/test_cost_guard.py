@@ -42,3 +42,36 @@ def test_under_budget_is_scoped_per_search(tmp_db, monkeypatch):
 
     assert cost_guard.under_budget(a, planned_cost_usd=0.01) is False
     assert cost_guard.under_budget(b, planned_cost_usd=0.05) is True
+
+
+def test_spent_so_far_includes_discovery(tmp_db):
+    search_id = repo.create_search("x", {"title_keywords": "x"}, 100.0)
+    repo.set_search_cost(search_id, 0.05)
+    repo.add_reference_price(
+        search_id, source="google_shopping", raw_data={}, median=10.0,
+        p25=9.0, p75=11.0, condition="used", cost_usd=0.49,
+    )
+    assert cost_guard.spent_so_far(search_id) == pytest.approx(0.54)
+
+
+def test_remaining_budget_subtracts_discovery(tmp_db, monkeypatch):
+    monkeypatch.setattr(config, "APIFY_BUDGET_USD", 0.90)
+    search_id = repo.create_search("x", {"title_keywords": "x"}, 100.0)
+    repo.set_search_cost(search_id, 0.05)
+    assert cost_guard.remaining_budget(search_id) == pytest.approx(0.85)
+
+
+def test_remaining_budget_never_negative(tmp_db, monkeypatch):
+    monkeypatch.setattr(config, "APIFY_BUDGET_USD", 0.10)
+    search_id = repo.create_search("x", {"title_keywords": "x"}, 100.0)
+    repo.set_search_cost(search_id, 0.50)
+    assert cost_guard.remaining_budget(search_id) == 0.0
+
+
+def test_under_budget_counts_discovery_spend(tmp_db, monkeypatch):
+    """Regression guard: before this, discovery spend was invisible to the
+    guard, so a search could authorise pricing it could not afford."""
+    monkeypatch.setattr(config, "APIFY_BUDGET_USD", 0.50)
+    search_id = repo.create_search("x", {"title_keywords": "x"}, 100.0)
+    repo.set_search_cost(search_id, 0.30)
+    assert cost_guard.under_budget(search_id, 0.30) is False

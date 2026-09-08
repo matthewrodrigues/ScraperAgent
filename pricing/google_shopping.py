@@ -20,7 +20,6 @@ from typing import Any
 
 from apify_client import ApifyClient
 
-import config
 from agents.criteria_parser import ParsedCriteria
 from integrations import clients
 
@@ -55,11 +54,17 @@ def _get_client() -> ApifyClient:
     return _client
 
 
-def fetch(criteria: ParsedCriteria) -> tuple[list[dict[str, Any]], float]:
+def fetch(criteria: ParsedCriteria, max_charge_usd: float) -> tuple[list[dict[str, Any]], float]:
     """Run the actor and return (price_points, cost_usd).
 
     `price_points` is a list of dicts: {price, currency, condition, url, title, source_item}.
     Caller is responsible for bucketing/aggregation.
+
+    `max_charge_usd` is required, not defaulted: it must be what the caller has
+    already computed as *remaining* budget for this search (see
+    `pricing.cost_guard.remaining_budget`), not the whole per-search budget —
+    otherwise a single run could be authorised to spend the entire budget on
+    top of whatever this search had already spent (spec 6.1).
     """
     client = _get_client()
 
@@ -76,9 +81,10 @@ def fetch(criteria: ParsedCriteria) -> tuple[list[dict[str, Any]], float]:
         run = client.actor(_ACTOR_ID).call(
             run_input=run_input,
             wait_duration=timedelta(seconds=_DEFAULT_RUN_TIMEOUT_SECS),
-            # Platform-side cap as a redundant safety net on top of our cost_guard.
-            # SDK rejects the call before launch if estimated cost exceeds this.
-            max_total_charge_usd=Decimal(str(config.APIFY_BUDGET_USD)),
+            # The caller passes what is LEFT of this search's budget, not the
+            # whole budget. Passing the full budget here let a search spend
+            # past the cap it had just been checked against (spec 6.1).
+            max_total_charge_usd=Decimal(str(max_charge_usd)),
         )
     except Exception as exc:
         # apify-client raises various exceptions for network/auth/timeouts; collapse
