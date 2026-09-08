@@ -170,8 +170,43 @@ buyer-scoped account and needs no per-user login.
 
 ## Setup
 
-Requires Python 3.11+ and the user's installed Chrome (for Best Offer
+Requires Python 3.12+ and the user's installed Chrome (for Best Offer
 placement).
+
+### Recommended: uv
+
+[uv](https://docs.astral.sh/uv/) is a fast Python package manager that can
+fetch the right Python version itself, so a friend running their own copy
+doesn't need Python pre-installed correctly or to manage a venv by hand.
+
+```
+# Install uv (one-time): https://docs.astral.sh/uv/getting-started/installation/
+uv sync
+uv run playwright install chrome
+uv run python main.py
+```
+
+`uv sync` reads `pyproject.toml` (mirrored from `requirements.txt`) and
+creates a `.venv` with every dependency pinned exactly as below — it does not
+try to install ScraperAgent itself as a package, since this is a set of
+top-level modules run from the repo root, not a library.
+
+Everywhere below that says `python -m ...` or `python scripts/...`, a friend
+using uv can instead run `uv run python -m ...` from the repo root without
+ever activating or locating a venv, for example:
+
+```
+uv run python -m keybroker
+uv run python -m scripts.add_friend alice --budget 7.50
+uv run python -m scripts.revoke_friend alice
+uv run python -m scripts.spend_report
+uv run python -m scripts.reconcile_spend
+uv run python -m pytest
+```
+
+### Alternative: venv + pip
+
+This is the original workflow and remains fully supported:
 
 ```
 python -m venv .venv
@@ -349,6 +384,135 @@ Keeping both means a misconfigured tunnel — or an accidental
 Two things that do **not** change for this setup: the app stays a single process
 (SQLite plus an in-process poller, so no horizontal scaling), and nothing needs
 containerizing.
+
+## Key broker
+
+Both API keys in this app cost money per call. If a friend wants to run their
+own copy — their own eBay account, their own dashboard, their own negotiations
+— the simplest thing is *not* to hand them your `ANTHROPIC_API_KEY` and
+`APIFY_TOKEN` outright. The key broker is a small reverse proxy that lets a
+friend's full copy of ScraperAgent reach Anthropic and Apify through your keys
+instead, under a token you issue and can revoke, with a monthly spend cap on
+both the friend and the broker as a whole.
+
+**Running it.** On your machine (the one holding the real keys):
+
+```
+python -m keybroker
+```
+
+It binds `127.0.0.1:8001` only — never all interfaces, since exposing it is a
+separate, deliberate step. To make it reachable from a friend's machine, put it
+behind Tailscale Funnel:
+
+```
+tailscale funnel 8001
+```
+
+Give the resulting URL to your friend as `SCRAPERAGENT_BROKER_URL` in their
+`.env` (see `.env.example`), and the token from the next step as
+`SCRAPERAGENT_BROKER_TOKEN`. With both set, their copy of the app sends
+Anthropic and Apify traffic to your broker instead of the vendors directly;
+with both empty (the default), it talks to the vendors with its own keys as
+usual.
+
+**Issuing and revoking tokens:**
+
+```
+python -m scripts.add_friend alice --budget 7.50
+python -m scripts.revoke_friend alice
+```
+
+`add_friend` prints the token once and stores only its SHA-256 — if it's lost,
+revoke and reissue rather than trying to recover it. `revoke_friend` sets a
+`revoked_at` timestamp rather than deleting the row, so past spend stays in the
+report for your own accounting.
+
+**Reading the spend report:**
+
+```
+python -m scripts.spend_report
+python -m scripts.spend_report --month 2026-08
+```
+
+Lists each friend's month-to-date spend against their budget, plus a global
+total against `BROKER_GLOBAL_MONTHLY_BUDGET_USD`. A `*` next to a total means it
+includes provisional Apify rows — see below.
+
+**Reconciling Apify spend (run this periodically):**
+
+```
+python -m scripts.reconcile_spend
+python -m scripts.reconcile_spend --dry-run
+```
+
+Apify's `usageTotalUsd` is not final when a run first reports as finished; it
+settles a few seconds later. Metering from that first reading under-metered real
+runs by more than 10x, and under-metering is the one failure a spend cap cannot
+survive — the leftover headroom just authorises the next over-budget run. So the
+broker debits each Apify run its *clamped ceiling* the moment the run is created
+— the most it can possibly cost — and flags the row provisional.
+`reconcile_spend` re-fetches those runs from Apify and replaces the estimate with
+what the run actually cost, which is normally a refund.
+
+Until you run it, Apify spend reads high and your friends see less headroom than
+they really have (never more). Schedule it every 15 minutes or so, the same way
+as the profile backup:
+
+```
+schtasks /create /tn "ScraperAgent reconcile spend" /sc minute /mo 15 ^
+  /tr "C:\dev\ScraperAgent\.venv\Scripts\python.exe -m scripts.reconcile_spend"
+```
+
+**The two caps.** Every friend has a `--budget` (default $5.00/month); once
+they hit it, the broker starts rejecting their requests until the calendar
+month turns over. There is also one global cap,
+`BROKER_GLOBAL_MONTHLY_BUDGET_USD` (default $25.00), that applies across all
+friends combined — a backstop against several friends each staying under their
+own budget while your total bill still runs away. The broker reserves the cost
+of one worst-case call before allowing a request, so the last permitted call
+lands at or under the budget; requests already in flight are not reserved
+against each other, so a burst of concurrent calls can overshoot by roughly that
+reservation per call in flight.
+
+**A fixed menu of models.** The broker serves only the models it knows how to
+price — the keys of `config.MODEL_PRICING`, Sonnet and Haiku by default. A
+request naming anything else is refused with a 400 that says so, because a model
+the broker cannot price would be billed to you and metered at $0.00, quietly
+disabling both caps above. The two lists are the same list on purpose, so they
+cannot drift apart.
+
+A friend who wants a different model is not stuck: they set their own
+`ANTHROPIC_API_KEY` and unset `SCRAPERAGENT_BROKER_URL`, and their copy talks to
+Anthropic directly on their own bill. The 400 message says this. There is
+deliberately no way to send a friend's own key *through* the broker — that would
+put your machine in custody of a credential it does not own, for no gain over
+going direct. If you would rather serve the new model yourself, add it to
+`MODEL_PRICING` with its rates and it becomes available to every friend.
+
+**What the broker will forward.** Only the two Anthropic endpoints this app
+uses — `/v1/messages` and `/v1/messages/count_tokens`. Anything else on the
+Anthropic side gets a 404, because paths like the Batches API slip past the
+per-request clamps and the spend meter.
+
+On the Apify side, the broker forwards any path but only `GET` and `POST` —
+the only methods this app ever issues (run creation, run-status polling,
+dataset item fetches). `PUT`, `PATCH`, and `DELETE` get a plain 405, closing
+off Apify's destructive management calls (deleting actors, tasks, schedules,
+webhooks) under your token. There's no path allowlist here the way there is
+for Anthropic: the Apify SDK's `.call()` can reach endpoints this codebase
+doesn't enumerate, so an allowlist risks silently breaking a friend's search.
+Method restriction doesn't have that risk, since this app never sends anything
+but `GET`/`POST` to Apify.
+
+**Two things worth knowing before you turn this on.** First, a friend's
+prompts and API responses pass through your machine's memory on their way to
+Anthropic and Apify — the broker is a proxy, not an escrow service, and it does
+not shield that traffic from a process running on your host. Second, the
+broker only governs traffic your friend's copy chooses to send it: nothing
+stops them from setting their own `ANTHROPIC_API_KEY` or `APIFY_TOKEN` in their
+own `.env` and bypassing you entirely. The broker is a convenience and a cost
+control for a friend acting in good faith, not a security boundary.
 
 ## Technology
 

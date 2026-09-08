@@ -114,8 +114,27 @@ def test_fetch_raises_when_client_raises(configured):
 
 def test_fetch_raises_when_token_missing(monkeypatch):
     monkeypatch.setattr(config, "APIFY_TOKEN", None)
-    with pytest.raises(google_shopping.PricingSourceError):
+    monkeypatch.setattr(config, "BROKER_URL", "")
+    monkeypatch.setattr(config, "BROKER_TOKEN", "")
+    with pytest.raises(google_shopping.PricingSourceError) as exc_info:
         google_shopping.fetch(ParsedCriteria(title_keywords="x"))
+    assert "APIFY_TOKEN" in str(exc_info.value)
+    assert "BROKER" in str(exc_info.value)
+
+
+def test_get_client_succeeds_in_broker_only_mode(monkeypatch):
+    """Regression test: a friend with only broker vars set (no APIFY_TOKEN)
+    must be able to construct a client — this is the bug from live e2e testing."""
+    monkeypatch.setattr(config, "APIFY_TOKEN", None)
+    monkeypatch.setattr(config, "BROKER_URL", "https://broker.example.ts.net")
+    monkeypatch.setattr(config, "BROKER_TOKEN", "sa_friendtoken")
+    fake_client = MagicMock()
+    with patch("pricing.google_shopping.ApifyClient", return_value=fake_client) as mock_ctor:
+        client = google_shopping._get_client()
+    assert client is fake_client
+    mock_ctor.assert_called_once_with(
+        token="sa_friendtoken", api_url="https://broker.example.ts.net/apify"
+    )
 
 
 def test_condition_defaults_to_new_when_absent(configured):

@@ -22,6 +22,7 @@ from apify_client import ApifyClient
 
 import config
 from agents.criteria_parser import ParsedCriteria
+from integrations import clients
 
 
 log = logging.getLogger(__name__)
@@ -45,9 +46,12 @@ _client: ApifyClient | None = None
 def _get_client() -> ApifyClient:
     global _client
     if _client is None:
-        if not config.APIFY_TOKEN:
-            raise PricingSourceError("APIFY_TOKEN is not set in .env")
-        _client = ApifyClient(config.APIFY_TOKEN)
+        if not clients.apify_configured():
+            raise PricingSourceError(
+                "Apify is not configured: set APIFY_TOKEN, or "
+                "SCRAPERAGENT_BROKER_URL + SCRAPERAGENT_BROKER_TOKEN, in .env"
+            )
+        _client = ApifyClient(**clients.apify_kwargs())
     return _client
 
 

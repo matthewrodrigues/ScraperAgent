@@ -203,3 +203,27 @@ EBAY_BROWSER_HEADED = os.getenv("EBAY_BROWSER_HEADED", "true").lower() in ("1", 
 # eBay's side — when an offer fails, the route surfaces a link to the latest
 # screenshot so the user can see what eBay's page actually looked like.
 EBAY_BROWSER_SCREENSHOTS_DIR = Path(os.getenv("EBAY_BROWSER_SCREENSHOTS_DIR", str(SECRETS_DIR / "screenshots")))
+
+# ---- Key broker ----
+# Client side. When BROKER_URL is set the app sends Anthropic and Apify traffic
+# through a broker holding someone else's keys (see
+# docs/superpowers/specs/2026-09-07-key-broker-phase1-design.md). Unset means
+# direct vendor calls with local keys — the owner's machine, and the escape
+# hatch for any friend whose broker is down.
+BROKER_URL = os.getenv("SCRAPERAGENT_BROKER_URL", "").rstrip("/")
+BROKER_TOKEN = os.getenv("SCRAPERAGENT_BROKER_TOKEN", "")
+
+if BROKER_URL and not BROKER_TOKEN:
+    # Fail fast rather than silently falling back to vendor keys a friend does
+    # not have — that failure would surface as a confusing 401 from Anthropic.
+    raise RuntimeError(
+        "SCRAPERAGENT_BROKER_URL is set but SCRAPERAGENT_BROKER_TOKEN is empty. "
+        "Set both, or neither (to use your own ANTHROPIC_API_KEY / APIFY_TOKEN)."
+    )
+
+# Server side. Only the broker host reads these.
+BROKER_DB_PATH = Path(os.getenv("BROKER_DB_PATH", str(DATA_DIR / "broker.db")))
+BROKER_PORT = int(os.getenv("BROKER_PORT", "8001"))
+BROKER_GLOBAL_MONTHLY_BUDGET_USD = float(
+    os.getenv("BROKER_GLOBAL_MONTHLY_BUDGET_USD", "25.00")
+)

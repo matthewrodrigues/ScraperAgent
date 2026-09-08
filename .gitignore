@@ -27,3 +27,8 @@ scraperagent.db
 scraperagent.db-journal
 scraperagent.db-wal
 scraperagent.db-shm
+
+# Broker ledger: friend token hashes and spend. Never commit.
+broker.db
+broker.db-journal
+broker.db-wal
