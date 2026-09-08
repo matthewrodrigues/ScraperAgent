@@ -122,6 +122,58 @@ def test_compiled_graph_runs_end_to_end(tmp_db):
     assert repo.get_search(search_id)["status"] == "awaiting_selection"
 
 
+def test_compiled_graph_zero_results_stays_failed_with_message(tmp_db):
+    """H1 regression test. discover() marks a zero-Best-Offer-match search
+    'failed' with an explanatory message; reference_prices must not overwrite
+    that with 'awaiting_selection' when the whole graph runs end to end. This
+    must exercise the COMPILED graph, not discover() in isolation — that
+    isolation is exactly what let the original bug through six reviews.
+
+    google_shopping.fetch is intentionally NOT mocked to succeed here: if
+    reference_prices's early-return regresses, this test would otherwise
+    pass anyway on network/credential failure inside fetch. Failing fetch
+    loudly (not via PricingSourceError) makes a regression here impossible
+    to miss."""
+    search_id = _make_search()
+    with patch("agents.graph.search_ebay", return_value=_result([])), \
+         patch(
+             "agents.graph.google_shopping.fetch",
+             side_effect=AssertionError(
+                 "reference_prices should have early-returned before calling "
+                 "google_shopping.fetch on an already-failed search"
+             ),
+         ):
+        compiled = graph.build_graph()
+        compiled.invoke({"search_id": search_id})
+
+    row = repo.get_search(search_id)
+    assert row["status"] == "failed"
+    assert "best offer" in row["error_message"].lower()
+    # Reference pricing must not have spent anything on a failed search.
+    assert repo.list_reference_prices(search_id) == []
+
+
+def test_compiled_graph_ebay_search_error_stays_failed_with_message(tmp_db):
+    """H1 regression test, EbaySearchError path (predates Phase 0a but is
+    the same defect). Must run the compiled graph end to end."""
+    search_id = _make_search()
+    with patch("agents.graph.search_ebay", side_effect=EbaySearchError("eBay returned 503")), \
+         patch(
+             "agents.graph.google_shopping.fetch",
+             side_effect=AssertionError(
+                 "reference_prices should have early-returned before calling "
+                 "google_shopping.fetch on an already-failed search"
+             ),
+         ):
+        compiled = graph.build_graph()
+        compiled.invoke({"search_id": search_id})
+
+    row = repo.get_search(search_id)
+    assert row["status"] == "failed"
+    assert "503" in row["error_message"]
+    assert repo.list_reference_prices(search_id) == []
+
+
 # ---------- reference_prices node ----------
 
 def test_reference_prices_persists_aggregates_and_flips_status(tmp_db):

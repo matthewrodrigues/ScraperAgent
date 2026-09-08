@@ -199,21 +199,37 @@ def search_ebay(criteria: ParsedCriteria, limit: int = 25) -> SearchResult:
             run_input=_build_actor_input(criteria),
             wait_duration=timedelta(seconds=_DEFAULT_RUN_TIMEOUT_SECS),
             max_total_charge_usd=Decimal(str(config.EBAY_SEARCH_BUDGET_USD)),
+            # maxPages=1 in the actor input still admits up to 240 items —
+            # well above `limit` and above what EBAY_SEARCH_BUDGET_USD covers
+            # at $0.002/result. max_items stops the vendor at `limit` results;
+            # the client-side [:limit] slice below stays as a backstop since
+            # the two enforce at different layers.
+            max_items=limit,
         )
+
+        if run is None:
+            raise EbaySearchError("eBay search returned no run.")
+        run_d = run.model_dump() if hasattr(run, "model_dump") else run
+        if (run_d.get("status") or "").upper() != "SUCCEEDED":
+            raise EbaySearchError(f"eBay search did not complete (status={run_d.get('status')}).")
+
+        # usage_total_usd is the field name on apify-client's Pydantic Run
+        # model (3.x); usageTotalUsd is the raw camelCase key some older
+        # mocks/dicts use. Keep this fallback order in sync with the
+        # equivalent lookup in pricing/google_shopping.py.
+        cost_usd = float(
+            run_d.get("usage_total_usd") or run_d.get("usageTotalUsd") or 0.0
+        )
+        dataset_id = run_d.get("default_dataset_id") or run_d.get("defaultDatasetId")
+        # Fetched inside this try: the run has already been charged by this
+        # point, so a network failure here must still become an
+        # EbaySearchError (via _explain below) rather than a raw client
+        # exception escaping uncaught into the background task.
+        raw_items = list(client.dataset(dataset_id).iterate_items()) if dataset_id else []
+    except EbaySearchError:
+        raise
     except Exception as exc:
         raise EbaySearchError(_explain(exc)) from exc
-
-    if run is None:
-        raise EbaySearchError("eBay search returned no run.")
-    run_d = run.model_dump() if hasattr(run, "model_dump") else run
-    if (run_d.get("status") or "").upper() != "SUCCEEDED":
-        raise EbaySearchError(f"eBay search did not complete (status={run_d.get('status')}).")
-
-    cost_usd = float(
-        run_d.get("usage_total_usd") or run_d.get("usageTotalUsd") or 0.0
-    )
-    dataset_id = run_d.get("default_dataset_id") or run_d.get("defaultDatasetId")
-    raw_items = list(client.dataset(dataset_id).iterate_items()) if dataset_id else []
 
     listings: list[Listing] = []
     for item in raw_items:
@@ -239,11 +255,18 @@ def _apply_seller_filter(
     None), and the user would be told their criteria matched nothing — sending
     them to widen filters that were never the problem. So we keep the listings,
     skip the filter, and hand the caller a warning to show.
+
+    This heuristic needs enough listings to be meaningful: a sample of one or
+    two "no feedback" listings cannot distinguish "genuinely new sellers" from
+    "the actor renamed the field" — with a small result set, all-missing is
+    plausible by chance and shouldn't override the user's explicit filter. So
+    require at least 3 listings before treating an all-missing run as a
+    broken actor contract; below that, apply the filter normally.
     """
     if criteria.min_seller_rating is None or not listings:
         return listings, None
 
-    if all(l.seller_rating is None for l in listings):
+    if len(listings) >= 3 and all(l.seller_rating is None for l in listings):
         log.error(
             "ebay_search: no listing carried a seller feedback percentage; "
             "the actor's output shape may have changed. Rating filter skipped."

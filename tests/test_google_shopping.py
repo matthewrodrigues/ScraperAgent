@@ -22,7 +22,9 @@ def configured(monkeypatch):
 
 
 def _make_run(status: str = "SUCCEEDED", usage: float = 0.03, dataset_id: str = "ds-1") -> dict:
-    return {"status": status, "defaultDatasetId": dataset_id, "usageUsd": usage}
+    # usageTotalUsd is the real wire key (see L6 fix note in google_shopping.py);
+    # usageUsd was never a real Apify Run field.
+    return {"status": status, "defaultDatasetId": dataset_id, "usageTotalUsd": usage}
 
 
 def _mock_client(run: dict, items: list[dict]) -> MagicMock:

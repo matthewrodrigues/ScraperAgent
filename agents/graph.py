@@ -108,6 +108,17 @@ def reference_prices(state: SearchState) -> SearchState:
     """
     search_id = state["search_id"]
 
+    # discover() may already have marked this search 'failed' (eBay error, or
+    # zero Best-Offer matches). Read the status from the DB row rather than
+    # graph state — LangGraph's state merging between nodes is not a reliable
+    # signal here. Bail before the cost guard so a failed search spends
+    # nothing further on reference pricing, and so the 'failed' status (with
+    # its explanatory message) survives to the dashboard instead of being
+    # overwritten by the unconditional 'awaiting_selection' writes below.
+    row = repo.get_search(search_id)
+    if row and row["status"] == "failed":
+        return {}
+
     remaining = cost_guard.remaining_budget(search_id)
     if not cost_guard.under_budget(search_id, _REF_PRICES_PLANNED_COST_USD):
         log.warning("Apify budget cap reached for search_id=%s; skipping ref-prices", search_id)

@@ -106,7 +106,11 @@ def fetch(criteria: ParsedCriteria, max_charge_usd: float) -> tuple[list[dict[st
 
     items = list(client.dataset(dataset_id).iterate_items())
     points = _parse_items(items)
-    cost_usd = float(run_d.get("usage_total_usd") or run_d.get("usageUsd") or 0.0)
+    # usage_total_usd is the field name on apify-client's Pydantic Run model
+    # (3.x); usageTotalUsd is the raw camelCase key some older mocks/dicts
+    # use. Keep this fallback order in sync with the equivalent lookup in
+    # integrations/ebay_search.py.
+    cost_usd = float(run_d.get("usage_total_usd") or run_d.get("usageTotalUsd") or 0.0)
 
     log.info(
         "google_shopping: %d items parsed (from %d raw) at cost $%.4f",

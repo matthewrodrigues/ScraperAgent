@@ -115,6 +115,16 @@ def test_limit_is_applied_client_side(configured):
     assert len(_run(_criteria(), _mock_client(items), limit=3).listings) == 3
 
 
+def test_max_items_passed_equal_to_limit(configured):
+    """M3: maxPages=1 in the actor input admits up to 240 items, well past
+    the budget ceiling at $0.002/result. max_items on the .call() kwarg is
+    what actually stops the vendor at `limit` results."""
+    client = _mock_client([_item("1")])
+    _run(_criteria(), client, limit=17)
+    kwargs = client.actor.return_value.call.call_args.kwargs
+    assert kwargs["max_items"] == 17
+
+
 def test_declared_ceiling_is_the_discovery_budget(configured):
     """Not APIFY_BUDGET_USD: the key broker debits a friend the declared
     ceiling provisionally, so over-declaring is a real charge against them."""
@@ -153,13 +163,30 @@ def test_partial_feedback_loss_behaves_normally(configured):
 def test_total_feedback_loss_keeps_listings_and_warns(configured):
     """The filter fails closed, so applying it to all-None data would drop
     every listing and the user would be told their criteria matched nothing.
-    Skip the filter, keep the listings, and say so."""
+    Skip the filter, keep the listings, and say so.
+
+    Needs >= 3 listings (see L4): with fewer, "all missing" is too likely to
+    be genuine new sellers rather than a broken actor contract, so the
+    all-missing heuristic only fires at 3+."""
+    result = _run(
+        _criteria(min_seller_rating=99.0),
+        _mock_client([_item("1", feedback=""), _item("2", feedback=""), _item("3", feedback="")]),
+    )
+    assert [l.ebay_item_id for l in result.listings] == ["1", "2", "3"]
+    assert result.warning == ebay_search.WARNING_NO_SELLER_FEEDBACK
+
+
+def test_small_all_missing_feedback_set_filters_normally_without_warning(configured):
+    """Two listings, both lacking feedback: too small a sample to distinguish
+    'new sellers' from 'renamed field', so the rating filter applies as
+    normal (excluding listings with no rating) and no degraded-mode warning
+    is shown."""
     result = _run(
         _criteria(min_seller_rating=99.0),
         _mock_client([_item("1", feedback=""), _item("2", feedback="")]),
     )
-    assert [l.ebay_item_id for l in result.listings] == ["1", "2"]
-    assert result.warning == ebay_search.WARNING_NO_SELLER_FEEDBACK
+    assert result.listings == []
+    assert result.warning is None
 
 
 def test_no_warning_when_no_rating_filter_requested(configured):
@@ -196,6 +223,17 @@ def _api_error(status_code: int) -> Exception:
     exc = RuntimeError(f"HTTP {status_code}")
     exc.status_code = status_code
     return exc
+
+
+def test_dataset_read_failure_becomes_ebay_search_error(configured):
+    """M2: by the time the dataset is fetched, the run has SUCCEEDED and
+    already been charged. A network failure reading it must still surface as
+    an EbaySearchError (via _explain), not a raw client exception escaping
+    into the background task uncaught."""
+    client = _mock_client([_item("1")])
+    client.dataset.return_value.iterate_items.side_effect = RuntimeError("connection reset")
+    with pytest.raises(ebay_search.EbaySearchError):
+        _run(_criteria(), client)
 
 
 def test_zero_results_is_not_an_error(configured):
