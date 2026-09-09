@@ -103,6 +103,17 @@ def test_introspection_targets_the_right_catalog():
     assert "spend" in params
 
 
+def test_postgres_utc_before_pins_utc():
+    clause = dialect.PostgresDialect().utc_before("created_at")
+    assert "AT TIME ZONE 'UTC'" in clause
+
+
+def test_sqlite_utc_before_is_a_plain_comparison():
+    clause = dialect.SqliteDialect().utc_before("created_at")
+    assert "AT TIME ZONE" not in clause
+    assert "created_at" in clause
+
+
 def test_postgres_dialect_does_not_connect_on_construction():
     """Importing or constructing must never open a socket — otherwise the test
     suite and every operator script would dial Supabase just by importing."""

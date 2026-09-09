@@ -74,6 +74,11 @@ class SqliteDialect:
         # comparison of "YYYY-MM-DD HH:MM:SS" strings is correct.
         return f"{column} >= ? AND {column} < ?"
 
+    def utc_before(self, column: str) -> str:
+        # Same reasoning as month_filter: SQLite's stored timestamps are
+        # already UTC text, so a plain lexical comparison is correct.
+        return f"{column} <= ?"
+
     @contextmanager
     def connect(self) -> Iterator[Any]:
         conn = sqlite3.connect(config.BROKER_DB_PATH, isolation_level=None)
@@ -132,6 +137,11 @@ class PostgresDialect:
             f"{column} >= (%s AT TIME ZONE 'UTC') "
             f"AND {column} < (%s AT TIME ZONE 'UTC')"
         )
+
+    def utc_before(self, column: str) -> str:
+        # Same UTC pin as month_filter: a naive bound string compared against
+        # a TIMESTAMPTZ column resolves in the session's timezone otherwise.
+        return f"{column} <= (%s AT TIME ZONE 'UTC')"
 
     def open_pool(self) -> None:
         from psycopg.rows import dict_row

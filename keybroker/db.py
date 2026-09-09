@@ -4,7 +4,7 @@ Deliberately tiny. The broker stores no domain data — no searches, listings,
 negotiations, or eBay credentials. Two tables is the whole model.
 
 Conventions mirror db/schema.sql: integer PKs, ISO-8601 UTC text timestamps
-written by SQLite's datetime('now'), cost_usd REAL, cascading FKs.
+(each dialect supplies its own default for "now"), cost_usd REAL, cascading FKs.
 
 Backend differences (SQLite vs Supabase Postgres) live in keybroker.dialect;
 this module keeps the SQL and asks the active dialect for a connection, a
@@ -12,7 +12,7 @@ placeholder style, and the few clauses the two backends spell differently.
 """
 
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Iterator
 
 from keybroker import dialect
@@ -84,8 +84,8 @@ def init_db() -> None:
 
 
 def month_bounds(month: str | None = None) -> tuple[str, str]:
-    """Half-open [start, end) for a YYYY-MM month, in SQLite's datetime('now')
-    format. Defaults to the current UTC month."""
+    """Half-open [start, end) for a YYYY-MM month, in the "YYYY-MM-DD HH:MM:SS"
+    UTC text format both dialects store. Defaults to the current UTC month."""
     if month is None:
         now = datetime.now(timezone.utc)
         year, mon = now.year, now.month
@@ -165,8 +165,8 @@ def record_spend(
     """Record one charge, upserting on (vendor, upstream_ref).
 
     Returns False when a row for this (vendor, upstream_ref) already existed,
-    which is the normal case for Apify polls. It is an upsert rather than an
-    INSERT OR IGNORE because the first observation of an Apify run is not
+    which is the normal case for Apify polls. It is an upsert rather than a
+    plain insert-and-ignore because the first observation of an Apify run is not
     necessarily the right one: usageTotalUsd settles after the run first reports
     a terminal status, so the ledger has to stay correctable. Ignoring the
     second write made the first (low) reading permanent, which under-metered
@@ -186,12 +186,14 @@ def record_spend(
         cur = conn.execute(
             _q(
                 """
-                INSERT OR IGNORE INTO spend (
+                INSERT INTO spend (
                     friend_id, vendor, model_or_actor, cost_usd,
                     input_tokens, output_tokens,
                     cache_read_tokens, cache_creation_tokens, upstream_ref,
                     provisional
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT (vendor, upstream_ref) WHERE upstream_ref IS NOT NULL
+                DO NOTHING
                 """
             ),
             row,
@@ -238,16 +240,21 @@ def list_provisional_spend(
 ) -> list[dict[str, Any]]:
     """Provisional rows old enough that the vendor's usage figure has settled.
 
-    Age is measured in SQLite's own clock so it matches the created_at default.
+    The cutoff is computed in Python (UTC) and passed as a bind parameter, the
+    same way revoke_friend's timestamp is, rather than relying on a backend's
+    own clock function.
     """
+    cutoff = datetime.now(timezone.utc) - timedelta(seconds=int(min_age_seconds))
+    cutoff_s = cutoff.strftime("%Y-%m-%d %H:%M:%S")
+    clause = dialect.active().utc_before("created_at")
     with get_conn() as conn:
         rows = conn.execute(
             _q(
                 "SELECT * FROM spend WHERE vendor = ? AND provisional = 1 "
                 "AND upstream_ref IS NOT NULL "
-                "AND created_at <= datetime('now', ?) ORDER BY id"
+                f"AND {clause} ORDER BY id"
             ),
-            (vendor, f"-{int(min_age_seconds)} seconds"),
+            (vendor, cutoff_s),
         ).fetchall()
         return [dict(r) for r in rows]
 
