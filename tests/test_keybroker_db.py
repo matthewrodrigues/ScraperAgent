@@ -46,8 +46,14 @@ def test_revoking_an_unknown_friend_returns_false(broker_db):
 
 def test_duplicate_name_is_rejected(broker_db):
     db.create_friend("alice", "hash-a", 5.0)
-    with pytest.raises(Exception):
+    with pytest.raises(db.DuplicateFriendError):
         db.create_friend("alice", "hash-b", 5.0)
+
+
+def test_duplicate_token_hash_is_rejected(broker_db):
+    db.create_friend("alice", "hash-shared", 5.0)
+    with pytest.raises(db.DuplicateFriendError):
+        db.create_friend("bob", "hash-shared", 5.0)
 
 
 def test_spend_accumulates_per_friend(broker_db):

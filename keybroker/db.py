@@ -18,6 +18,14 @@ from typing import Any, Iterator
 from keybroker import dialect
 
 
+class DuplicateFriendError(RuntimeError):
+    """A friend with that name or token hash already exists.
+
+    Raised instead of the driver's own integrity error so callers do not have
+    to know whether they are talking to SQLite or Postgres.
+    """
+
+
 def _q(sql: str) -> str:
     """Translate this module's ?-style placeholders to the active dialect's.
 
@@ -100,15 +108,33 @@ def month_bounds(month: str | None = None) -> tuple[str, str]:
 
 def create_friend(name: str, token_sha256: str, monthly_budget_usd: float) -> int:
     with get_conn() as conn:
-        row = conn.execute(
-            _q(
-                "INSERT INTO friends (name, token_sha256, monthly_budget_usd) "
-                "VALUES (?, ?, ?) RETURNING id"
-            ),
-            (name, token_sha256, monthly_budget_usd),
-        ).fetchone()
-        _commit(conn)
-        return int(row["id"] if not isinstance(row, tuple) else row[0])
+        try:
+            row = conn.execute(
+                _q(
+                    "INSERT INTO friends (name, token_sha256, monthly_budget_usd) "
+                    "VALUES (?, ?, ?) RETURNING id"
+                ),
+                (name, token_sha256, monthly_budget_usd),
+            ).fetchone()
+            _commit(conn)
+            return int(row["id"] if not isinstance(row, tuple) else row[0])
+        except Exception as e:
+            # Catch backend-specific integrity errors and translate to a domain exception.
+            # SQLite raises sqlite3.IntegrityError; Postgres raises psycopg.errors.UniqueViolation.
+            # Import psycopg lazily so the SQLite path never needs it at module scope.
+            if dialect.active().name == "sqlite":
+                import sqlite3
+                if isinstance(e, sqlite3.IntegrityError):
+                    raise DuplicateFriendError() from e
+            else:
+                # Postgres path
+                try:
+                    from psycopg import errors as psycopg_errors
+                    if isinstance(e, psycopg_errors.UniqueViolation):
+                        raise DuplicateFriendError() from e
+                except ImportError:
+                    pass
+            raise
 
 
 def get_friend_by_token_hash(token_sha256: str) -> dict[str, Any] | None:
