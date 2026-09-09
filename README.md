@@ -530,6 +530,50 @@ stops them from setting their own `ANTHROPIC_API_KEY` or `APIFY_TOKEN` in their
 own `.env` and bypassing you entirely. The broker is a convenience and a cost
 control for a friend acting in good faith, not a security boundary.
 
+**Postgres backend (Supabase).** The broker's default storage is SQLite
+(`broker.db`). For a production or long-running instance, you can optionally
+back it with Supabase Postgres by setting `SUPABASE_DB_URL` to a connection
+string. With the variable set, the broker uses Postgres; with it unset (the
+default), it uses SQLite and the URL setting is ignored. There is no separate
+mode flag — which database is live is determined by whether the URL is present.
+
+To get the connection string: log into the Supabase dashboard, navigate to
+**Project Settings** → **Database** → **Connection string** → **URI**, and copy
+it. The string must never be added to `.env.example`, since it contains
+credentials; it lives only in `.env` on your machine.
+
+Rolling back from Postgres to SQLite is as simple as unsetting `SUPABASE_DB_URL`
+and restarting the broker. However, spend recorded in Postgres does **not** flow
+back to SQLite during rollback — if you switch mid-month and then switch back,
+your friends' spend records will reset to zero for that month and their monthly
+caps will reopen. Treat an unset as an **emergency lever**, not a routine
+configuration toggle. Use it only to escape Postgres if the production database
+becomes unavailable; do not test rollback in a live month.
+
+A separate database, `SUPABASE_TEST_DB_URL`, is used only by the contract tests
+(`tests/test_keybroker_contract.py`). It runs the same schema migrations as
+production but with a truncating fixture, so the test database must be different
+— pointing the contract tests at your production Postgres would zero out all
+your data on the first run. CI does not exercise the Postgres codepath at all;
+the contract tests run against the test database and the smoke script (see
+below) provides the only pre-deploy check against the real schema.
+
+Before deploying a broker update to production, run the smoke script:
+
+```
+python -m scripts.smoke_supabase
+```
+
+It exercises three things that the test suite cannot: the DDL migrations, the
+`AT TIME ZONE 'UTC'` timezone-aware month comparison, and `information_schema`
+schema introspection. All three are Postgres-only by construction and never
+touched by the SQLite contract tests. The script creates a throwaway test
+friend, runs through spend recording and settlement, validates that spend rows
+land in the correct month, and then cleans up after itself. It writes to
+whatever `SUPABASE_DB_URL` points at and then deletes its test data, so it is
+safe to run against production — its whole purpose is to check against the real
+schema before you deploy.
+
 ## Technology
 
 - Orchestration: LangGraph (`Send` API for fan-out, durable SQLite checkpointing)
