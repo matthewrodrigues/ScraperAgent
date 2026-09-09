@@ -133,15 +133,25 @@ class PostgresDialect:
         # silently, and only near the 1st. Deliberately NOT solved with
         # `SET TIME ZONE` on connect — that is session state and unreliable
         # under a transaction pooler. See spec section 4.1.
+        #
+        # The ::timestamp cast is LOAD-BEARING, not decoration. psycopg sends a
+        # Python str as oid 0 (unknown), so Postgres resolves the operator
+        # itself; `x AT TIME ZONE z` desugars to timezone(z, x), and with an
+        # unknown x the preferred type of the datetime category wins -- which is
+        # timestamptz, NOT timestamp. Uncast, this clause therefore reads the
+        # naive bound in the SESSION's timezone and then renders it back, so the
+        # month boundary moves by the session's UTC offset: exactly the bug the
+        # clause exists to prevent, and invisible wherever the session is
+        # already UTC (Supabase's default). The cast pins the overload.
         return (
-            f"{column} >= (%s AT TIME ZONE 'UTC') "
-            f"AND {column} < (%s AT TIME ZONE 'UTC')"
+            f"{column} >= (%s::timestamp AT TIME ZONE 'UTC') "
+            f"AND {column} < (%s::timestamp AT TIME ZONE 'UTC')"
         )
 
     def utc_before(self, column: str) -> str:
-        # Same UTC pin as month_filter: a naive bound string compared against
-        # a TIMESTAMPTZ column resolves in the session's timezone otherwise.
-        return f"{column} <= (%s AT TIME ZONE 'UTC')"
+        # Same UTC pin as month_filter, including the load-bearing ::timestamp
+        # cast — see the explanation there.
+        return f"{column} <= (%s::timestamp AT TIME ZONE 'UTC')"
 
     def open_pool(self) -> None:
         from psycopg.rows import dict_row

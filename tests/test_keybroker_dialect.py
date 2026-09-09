@@ -80,6 +80,13 @@ def test_postgres_month_filter_pins_utc():
     session shifts every month boundary by hours, silently."""
     clause = dialect.PostgresDialect().month_filter("created_at")
     assert "AT TIME ZONE 'UTC'" in clause
+    # The cast is what makes the pin real. psycopg sends str as oid 0 (unknown),
+    # and Postgres then resolves `x AT TIME ZONE z` to the timestamptz overload
+    # because timestamptz is the datetime category's preferred type -- so the
+    # uncast clause reads the bound in the session's timezone. Assert the cast
+    # explicitly; a semantic check against a live non-UTC session lives in
+    # tests/test_keybroker_contract.py.
+    assert clause.count("%s::timestamp AT TIME ZONE 'UTC'") == 2
 
 
 def test_sqlite_month_filter_is_a_plain_comparison():
@@ -105,7 +112,7 @@ def test_introspection_targets_the_right_catalog():
 
 def test_postgres_utc_before_pins_utc():
     clause = dialect.PostgresDialect().utc_before("created_at")
-    assert "AT TIME ZONE 'UTC'" in clause
+    assert "%s::timestamp AT TIME ZONE 'UTC'" in clause
 
 
 def test_sqlite_utc_before_is_a_plain_comparison():

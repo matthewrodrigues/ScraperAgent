@@ -7,6 +7,7 @@ the broker for real use silently arms this suite against the live ledger.
 """
 
 import os
+from urllib.parse import urlparse
 
 import pytest
 
@@ -14,13 +15,41 @@ import config
 from keybroker import db, dialect
 
 
+def db_identity(url: str) -> tuple:
+    """A normalised identity for a Postgres URL.
+
+    Supabase spells ONE database several ways: the session pooler on :5432, the
+    transaction pooler on :6543, the direct db.<ref>.supabase.co host, any of
+    them with ?sslmode=require appended. String equality therefore does not
+    answer "is this the same database" -- and that is the only question the
+    truncate guard below actually needs answered.
+
+    The project ref is the identity when we can find it: it lives in the pooler
+    username (postgres.<ref>) and in the direct host (db.<ref>.supabase.co).
+    Port, host spelling and query string are noise. For anything that is not
+    recognisably Supabase we fall back to (host, db, user), which is still
+    strictly stronger than comparing raw strings.
+    """
+    p = urlparse(url)
+    host = (p.hostname or "").lower()
+    user = (p.username or "").lower()
+    dbname = (p.path or "").lstrip("/").lower()
+    if "." in user:
+        return ("supabase", user.split(".", 1)[1], dbname)
+    if host.startswith("db.") and host.endswith(".supabase.co"):
+        return ("supabase", host[len("db."):-len(".supabase.co")], dbname)
+    return ("raw", host, dbname, user)
+
+
 def _postgres_url() -> str:
     url = os.getenv("SUPABASE_TEST_DB_URL", "")
     prod = os.getenv("SUPABASE_DB_URL", "")
-    if url and prod and url == prod:
+    if url and prod and db_identity(url) == db_identity(prod):
         pytest.fail(
-            "SUPABASE_TEST_DB_URL must not equal SUPABASE_DB_URL — these tests "
-            "truncate the tables they touch."
+            "SUPABASE_TEST_DB_URL names the same database as SUPABASE_DB_URL — "
+            "these tests truncate the tables they touch. Note this compares the "
+            "database's identity, not the URL text: the two pooler ports and the "
+            "direct host are three spellings of one project."
         )
     return url
 
@@ -51,13 +80,19 @@ def backend(request, tmp_path, monkeypatch):
         "fixture ordering changed and this test is no longer testing what it claims"
     )
 
-    db.init_db()
-    if request.param == "postgres":
-        with db.get_conn() as conn:
-            conn.execute("TRUNCATE spend, friends RESTART IDENTITY CASCADE")
-            conn.commit()
-    yield request.param
-    dialect.reset_for_tests()
+    # try/finally, not a bare post-yield statement: if init_db() or the
+    # TRUNCATE raises, a yield-fixture never reaches its teardown, and the
+    # PostgresDialect this fixture just cached would leak into every following
+    # test in the session.
+    try:
+        db.init_db()
+        if request.param == "postgres":
+            with db.get_conn() as conn:
+                conn.execute("TRUNCATE spend, friends RESTART IDENTITY CASCADE")
+                conn.commit()
+        yield request.param
+    finally:
+        dialect.reset_for_tests()
 
 
 def test_create_and_find_a_friend(backend):
@@ -115,3 +150,76 @@ def test_global_spend_sums_across_friends(backend):
     db.record_spend(a, "anthropic", 0.02, upstream_ref="m1")
     db.record_spend(b, "anthropic", 0.03, upstream_ref="m2")
     assert db.global_month_spend() == pytest.approx(0.05)
+
+
+# --- the truncate guard itself -------------------------------------------
+# These need no database: they test the identity function the guard relies on.
+
+_POOLER_5432 = "postgresql://postgres.abcdefghijklm:pw@aws-0-us-east-1.pooler.supabase.com:5432/postgres"
+_POOLER_6543 = "postgresql://postgres.abcdefghijklm:pw@aws-0-us-east-1.pooler.supabase.com:6543/postgres"
+_DIRECT = "postgresql://postgres:pw@db.abcdefghijklm.supabase.co:5432/postgres"
+_OTHER_PROJECT = "postgresql://postgres.zzzzzzzzzzzzz:pw@aws-0-us-east-1.pooler.supabase.com:5432/postgres"
+
+
+def test_the_two_pooler_ports_are_one_database():
+    """The exact failure the old string-equality guard allowed: point
+    SUPABASE_TEST_DB_URL at production's transaction pooler and the strings
+    differ, so the guard passes and the fixture truncates the live ledger."""
+    assert db_identity(_POOLER_5432) == db_identity(_POOLER_6543)
+
+
+def test_pooler_and_direct_host_are_one_database():
+    assert db_identity(_POOLER_5432) == db_identity(_DIRECT)
+
+
+def test_a_trailing_sslmode_does_not_change_identity():
+    assert db_identity(_POOLER_5432) == db_identity(_POOLER_5432 + "?sslmode=require")
+
+
+def test_different_projects_are_different_databases():
+    assert db_identity(_POOLER_5432) != db_identity(_OTHER_PROJECT)
+
+
+def test_non_supabase_urls_still_compare_on_host_and_db():
+    a = "postgresql://me:pw@localhost:5432/broker"
+    assert db_identity(a) == db_identity("postgresql://me:pw@localhost:6543/broker")
+    assert db_identity(a) != db_identity("postgresql://me:pw@localhost:5432/other")
+
+
+# --- the UTC pin, against a real server --------------------------------------
+
+def test_month_filter_is_utc_under_a_hostile_session_timezone(backend):
+    """Spec 4.1, tested rather than grepped.
+
+    The unit test can only assert the SQL text. This runs the real clause on a
+    real server whose session timezone is deliberately NOT UTC -- which is the
+    only condition under which the bug is visible. Supabase defaults to UTC, so
+    an uncast clause passes everywhere else, including the smoke script.
+    """
+    if backend != "postgres":
+        pytest.skip("session timezone is a Postgres concept")
+
+    clause = dialect.active().month_filter("t")
+    bounds = ("2026-09-01 00:00:00", "2026-10-01 00:00:00")
+
+    def matches(instant: str) -> bool:
+        sql = f"SELECT 1 FROM (SELECT timestamptz '{instant}' AS t) s WHERE {clause}"
+        with db.get_conn() as conn:
+            # Any pooler default, ALTER ROLE ... SET timezone, or PGTZ can do
+            # this to us in production; make it explicit here.
+            conn.execute("SET TIME ZONE 'America/New_York'")
+            return conn.execute(sql, bounds).fetchone() is not None
+
+    # Midnight UTC on the 1st is inside September, and 23:59:59Z on Aug 31 is
+    # not. With the uncast clause the boundary moves by the session offset and
+    # both of these flip.
+    assert matches("2026-09-01 00:00:00+00") is True, (
+        "the first instant of the month was excluded — the month boundary is "
+        "resolving in the session timezone, not UTC"
+    )
+    assert matches("2026-08-31 23:59:59+00") is False, (
+        "an August instant was counted in September — the month boundary is "
+        "resolving in the session timezone, not UTC"
+    )
+    assert matches("2026-09-30 23:59:59+00") is True
+    assert matches("2026-10-01 00:00:00+00") is False
