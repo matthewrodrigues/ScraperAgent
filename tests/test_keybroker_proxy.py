@@ -313,3 +313,57 @@ def test_apify_poll_does_not_lower_the_provisional_debit(broker, monkeypatch):
     row = db.get_spend_by_ref("apify", "r1")
     assert row["cost_usd"] == pytest.approx(ceiling)
     assert row["provisional"] == 1
+
+
+def test_db_failure_during_auth_returns_503_and_forwards_nothing(broker, monkeypatch):
+    """Auth gates spending, so it fails closed. A 500 here would be a bug
+    report; forwarding anyway would be an uncapped bill."""
+    client, token = broker
+    fake = _install(monkeypatch, _anthropic_response())
+
+    def boom(*_a, **_k):
+        raise RuntimeError("connection refused")
+
+    monkeypatch.setattr(app_module.auth, "friend_for_token", boom)
+    r = client.post("/anthropic/v1/messages", json=_body(), headers={"x-api-key": token})
+    assert r.status_code == 503
+    assert fake.calls == []
+
+
+def test_db_failure_during_quota_returns_503_and_forwards_nothing(broker, monkeypatch):
+    """The cap cannot be checked, so nothing may be spent."""
+    client, token = broker
+    fake = _install(monkeypatch, _anthropic_response())
+
+    def boom(*_a, **_k):
+        raise RuntimeError("pool timeout")
+
+    monkeypatch.setattr(app_module.quota, "check", boom)
+    r = client.post("/anthropic/v1/messages", json=_body(), headers={"x-api-key": token})
+    assert r.status_code == 503
+    assert fake.calls == []
+
+
+def test_quota_exceeded_still_returns_402_not_503(broker, monkeypatch):
+    """A real refusal must stay distinguishable from an outage — 402 is
+    actionable by the friend, 503 is not."""
+    client, token = broker
+    friend = db.get_friend_by_name("alice")
+    db.record_spend(friend["id"], "anthropic", 4.90, upstream_ref="m1")
+    _install(monkeypatch, _anthropic_response())
+    r = client.post("/anthropic/v1/messages", json=_body(), headers={"x-api-key": token})
+    assert r.status_code == 402
+
+
+def test_db_failure_during_metering_still_returns_the_response(broker, monkeypatch):
+    """Metering runs AFTER the money is spent, so it fails open. Withholding
+    the response would cost the friend both the result and the dollars."""
+    client, token = broker
+
+    def boom(*_a, **_k):
+        raise RuntimeError("connection refused")
+
+    _install(monkeypatch, _anthropic_response())
+    monkeypatch.setattr(app_module.meter, "record_anthropic", boom)
+    r = client.post("/anthropic/v1/messages", json=_body(), headers={"x-api-key": token})
+    assert r.status_code == 200

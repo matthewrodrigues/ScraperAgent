@@ -84,7 +84,15 @@ async def _proxy(vendor: str, path: str, request: Request) -> Response:
         # Fail closed, mirroring api/auth.py on an unset DASHBOARD_PASSWORD.
         return Response(f"Broker {vendor} key is not configured.", status_code=503)
 
-    friend = auth.friend_for_token(auth.extract_token(request.headers, vendor))
+    try:
+        friend = auth.friend_for_token(auth.extract_token(request.headers, vendor))
+    except Exception:
+        # Fail CLOSED: the cap cannot be checked, so nothing may be spent.
+        # Distinct from 401 (a known-bad token) and 402 (a real refusal) —
+        # this is the broker being unable to answer, not a decision about
+        # this caller.
+        log.exception("broker: datastore unavailable during auth")
+        return Response("Broker datastore unavailable.", status_code=503)
     if friend is None:
         client_host = request.client.host if request.client else "?"
         log.warning("broker: rejected %s request from %s", vendor, client_host)
@@ -133,6 +141,9 @@ async def _proxy(vendor: str, path: str, request: Request) -> Response:
         # 402, never 429: the Anthropic SDK retries 429 twice and Apify's four
         # times, which would bury this behind a confusing delay.
         return Response(exc.detail, status_code=402)
+    except Exception:
+        log.exception("broker: datastore unavailable during quota check")
+        return Response("Broker datastore unavailable.", status_code=503)
 
     params = dict(request.query_params)
     apify_ceiling_usd: float | None = None
@@ -168,19 +179,26 @@ async def _proxy(vendor: str, path: str, request: Request) -> Response:
         return Response(f"Upstream {vendor} error.", status_code=502)
 
     if upstream.status_code < 400:
-        if vendor == "anthropic":
-            meter.record_anthropic(friend["id"], upstream.content)
-        else:
-            # A created run is debited at its clamped ceiling immediately, then
-            # settled by scripts.reconcile_spend — Apify's usage figure is not
-            # trustworthy at the moment the run first reports terminal. Anything
-            # that is not a run creation (or carries no run id) falls through to
-            # the defensive path.
-            debited = apify_ceiling_usd is not None and meter.record_apify_provisional(
-                friend["id"], upstream.content, apify_ceiling_usd
-            )
-            if not debited:
-                meter.record_apify(friend["id"], upstream.content)
+        try:
+            if vendor == "anthropic":
+                meter.record_anthropic(friend["id"], upstream.content)
+            else:
+                # A created run is debited at its clamped ceiling immediately, then
+                # settled by scripts.reconcile_spend — Apify's usage figure is not
+                # trustworthy at the moment the run first reports terminal. Anything
+                # that is not a run creation (or carries no run id) falls through to
+                # the defensive path.
+                debited = apify_ceiling_usd is not None and meter.record_apify_provisional(
+                    friend["id"], upstream.content, apify_ceiling_usd
+                )
+                if not debited:
+                    meter.record_apify(friend["id"], upstream.content)
+        except Exception:
+            # Fail OPEN: the money is already spent upstream, so a bookkeeping
+            # failure must not also cost the friend their result. meter.py has
+            # internal exception handling too; this catches the case where that
+            # mechanism fails or the metering function itself is broken.
+            log.exception("failed to record spend for friend %s", friend["id"])
 
     return Response(
         content=upstream.content,
