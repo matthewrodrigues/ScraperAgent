@@ -16,7 +16,7 @@ import httpx
 from fastapi import FastAPI, Request, Response
 
 import config
-from keybroker import auth, clamps, db, meter, quota
+from keybroker import auth, clamps, db, dialect, meter, quota
 
 
 log = logging.getLogger(__name__)
@@ -53,6 +53,7 @@ _client: httpx.AsyncClient | None = None
 async def lifespan(app: FastAPI):
     global _client
     db.init_db()
+    dialect.active().open_pool()
     # Ten minutes matches the Anthropic SDK default, so the broker never times
     # out before the client it is serving does.
     #
@@ -66,6 +67,7 @@ async def lifespan(app: FastAPI):
     finally:
         await client.aclose()
         _client = None
+        dialect.active().close_pool()
 
 
 app = FastAPI(title="ScraperAgent key broker", lifespan=lifespan)
