@@ -199,7 +199,16 @@ async def _proxy(vendor: str, path: str, request: Request) -> Response:
     elif clamps.is_apify_run_creation(request.method, path):
         # The body is the actor's own input record and must survive untouched;
         # Apify reads the run's spend ceiling from the query string instead.
-        remaining = await run_in_threadpool(quota.remaining_usd, friend)
+        try:
+            remaining = await run_in_threadpool(quota.remaining_usd, friend)
+        except Exception:
+            # Same fail-closed rule as quota.check above, and for the same
+            # reason: this reads the ledger to size the run's ceiling, and it
+            # runs BEFORE anything is forwarded. Left unguarded it surfaced as
+            # a bare 500 — indistinguishable from a broker bug, when the whole
+            # point of the 503 is to say "outage, retry" to a friend's SDK.
+            log.exception("broker: datastore unavailable while sizing the apify ceiling")
+            return Response("Broker datastore unavailable.", status_code=503)
         params = clamps.clamp_apify_charge(params, remaining)
         # Remember what the run was actually capped at: that is the worst case
         # this run can cost, and it is what the friend gets debited on creation.

@@ -367,3 +367,22 @@ def test_db_failure_during_metering_still_returns_the_response(broker, monkeypat
     monkeypatch.setattr(app_module.meter, "record_anthropic", boom)
     r = client.post("/anthropic/v1/messages", json=_body(), headers={"x-api-key": token})
     assert r.status_code == 200
+
+
+def test_db_failure_while_sizing_the_apify_ceiling_returns_503(broker, monkeypatch):
+    """The fourth of five queries per request, and the one most likely to lose
+    a race for a saturated pool. It runs before anything is forwarded, so it
+    fails closed like the rest of the pre-spend path — a 500 here would read as
+    a broker bug rather than an outage."""
+    client, token = broker
+    fake = _install(monkeypatch, httpx.Response(200, json={"data": {"id": "r1"}}))
+
+    def boom(*_a, **_k):
+        raise RuntimeError("pool timeout")
+
+    monkeypatch.setattr(app_module.quota, "remaining_usd", boom)
+    r = client.post("/apify/v2/acts/actor~x/runs",
+                    json={"queries": "laptop"},
+                    headers={"authorization": f"Bearer {token}"})
+    assert r.status_code == 503
+    assert fake.calls == []
