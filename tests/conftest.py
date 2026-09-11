@@ -7,6 +7,7 @@ Every test gets a fresh SQLite file in a tmp dir so tests can't pollute
 import pytest
 
 import config
+from keybroker import dialect
 from db import repo
 
 
@@ -43,3 +44,28 @@ def tmp_db(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "DB_PATH", db_path)
     repo.init_db()
     return db_path
+
+# The broker's storage layer routes through keybroker.dialect, which chooses
+# Postgres whenever config.SUPABASE_DB_URL is set. A developer with a real
+# Supabase URL in .env would therefore have the ENTIRE test suite -- not just
+# the opt-in Postgres contract tests -- connect to the live project and write
+# to it. That happened once during development: a bare `pytest` created the
+# schema and inserted a friend row in production.
+#
+# So the suite pins itself to SQLite. The Postgres contract tests opt back in
+# deliberately, and only via SUPABASE_TEST_DB_URL, which must name a different
+# database.
+#
+# Blanking the setting is NOT sufficient on its own: dialect.active() consults
+# config only when nothing is cached, and dialect._active is a module global
+# that outlives any single test. A contract-test fixture that dies before its
+# teardown (an init_db() failure, say) leaves a live PostgresDialect -- pool and
+# all -- in that global, and every later test then runs against Postgres while
+# this guard sits there blanking a setting nobody reads. So reset the cache too,
+# on both sides of the test.
+@pytest.fixture(autouse=True)
+def _never_touch_production_postgres(monkeypatch):
+    monkeypatch.setattr(config, "SUPABASE_DB_URL", "")
+    dialect.reset_for_tests()
+    yield
+    dialect.reset_for_tests()

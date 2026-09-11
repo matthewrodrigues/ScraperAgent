@@ -14,9 +14,10 @@ from contextlib import asynccontextmanager
 
 import httpx
 from fastapi import FastAPI, Request, Response
+from fastapi.concurrency import run_in_threadpool
 
 import config
-from keybroker import auth, clamps, db, meter, quota
+from keybroker import auth, clamps, db, dialect, meter, quota
 
 
 log = logging.getLogger(__name__)
@@ -52,7 +53,22 @@ _client: httpx.AsyncClient | None = None
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global _client
-    db.init_db()
+    # Spec section 6: an unreachable datastore at startup must NOT take the
+    # process down. Uvicorn aborts on a lifespan exception, which would remove
+    # every route -- including the per-request 503 handlers that exist for
+    # exactly this condition -- and leave the platform log showing a raw driver
+    # traceback that names no setting. Log once at ERROR naming the setting,
+    # then serve; _proxy returns 503 per request until the datastore is back.
+    #
+    # open_pool() first, then init_db(): init_db() would otherwise open the pool
+    # lazily through connect(), leaving open_pool() below it as dead code.
+    try:
+        dialect.active().open_pool()
+        db.init_db()
+    except Exception:
+        log.exception(
+            "broker: could not reach the datastore at startup; check SUPABASE_DB_URL"
+        )
     # Ten minutes matches the Anthropic SDK default, so the broker never times
     # out before the client it is serving does.
     #
@@ -66,6 +82,7 @@ async def lifespan(app: FastAPI):
     finally:
         await client.aclose()
         _client = None
+        dialect.active().close_pool()
 
 
 app = FastAPI(title="ScraperAgent key broker", lifespan=lifespan)
@@ -76,13 +93,53 @@ def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
+def _record_spend(
+    vendor: str, friend_id: int, content: bytes, apify_ceiling_usd: float | None
+) -> None:
+    """The blocking metering writes, hoisted out of the async handler.
+
+    Kept as a plain sync function so _proxy can hand it to run_in_threadpool:
+    over a network datastore these are real round trips, and they must not run
+    on the event loop. See the note on _proxy.
+    """
+    if vendor == "anthropic":
+        meter.record_anthropic(friend_id, content)
+        return
+    # A created run is debited at its clamped ceiling immediately, then settled
+    # by scripts.reconcile_spend — Apify's usage figure is not trustworthy at
+    # the moment the run first reports terminal. Anything that is not a run
+    # creation (or carries no run id) falls through to the defensive path.
+    debited = apify_ceiling_usd is not None and meter.record_apify_provisional(
+        friend_id, content, apify_ceiling_usd
+    )
+    if not debited:
+        meter.record_apify(friend_id, content)
+
+
+# Every datastore call below goes through run_in_threadpool. Under SQLite these
+# were microsecond-scale local file reads and calling them inline was harmless;
+# against Supabase they are ~5 sequential network round trips per proxied
+# request. Run on the event loop they serialise every concurrent friend, and a
+# saturated pool blocks the whole loop for psycopg's 30s PoolTimeout — freezing
+# in-flight Anthropic responses and /health, so the platform concludes the
+# broker is dead and restarts it mid-call.
 async def _proxy(vendor: str, path: str, request: Request) -> Response:
     owner_key = getattr(config, _OWNER_KEY_ATTR[vendor], "")
     if not owner_key:
         # Fail closed, mirroring api/auth.py on an unset DASHBOARD_PASSWORD.
         return Response(f"Broker {vendor} key is not configured.", status_code=503)
 
-    friend = auth.friend_for_token(auth.extract_token(request.headers, vendor))
+    try:
+        friend = await run_in_threadpool(
+            auth.friend_for_token, auth.extract_token(request.headers, vendor)
+        )
+    except Exception:
+        # Fail CLOSED: the cap cannot be checked, so nothing may be spent.
+        # Distinct from 401 (a known-bad token) and 402 (a real refusal) —
+        # this is the broker being unable to answer, not a decision about
+        # this caller.
+        log.exception("broker: datastore unavailable during auth")
+        return Response("Broker datastore unavailable.", status_code=503)
     if friend is None:
         client_host = request.client.host if request.client else "?"
         log.warning("broker: rejected %s request from %s", vendor, client_host)
@@ -126,11 +183,14 @@ async def _proxy(vendor: str, path: str, request: Request) -> Response:
             return Response(str(exc), status_code=400)
 
     try:
-        quota.check(friend)
+        await run_in_threadpool(quota.check, friend)
     except quota.QuotaExceeded as exc:
         # 402, never 429: the Anthropic SDK retries 429 twice and Apify's four
         # times, which would bury this behind a confusing delay.
         return Response(exc.detail, status_code=402)
+    except Exception:
+        log.exception("broker: datastore unavailable during quota check")
+        return Response("Broker datastore unavailable.", status_code=503)
 
     params = dict(request.query_params)
     apify_ceiling_usd: float | None = None
@@ -139,7 +199,17 @@ async def _proxy(vendor: str, path: str, request: Request) -> Response:
     elif clamps.is_apify_run_creation(request.method, path):
         # The body is the actor's own input record and must survive untouched;
         # Apify reads the run's spend ceiling from the query string instead.
-        params = clamps.clamp_apify_charge(params, quota.remaining_usd(friend))
+        try:
+            remaining = await run_in_threadpool(quota.remaining_usd, friend)
+        except Exception:
+            # Same fail-closed rule as quota.check above, and for the same
+            # reason: this reads the ledger to size the run's ceiling, and it
+            # runs BEFORE anything is forwarded. Left unguarded it surfaced as
+            # a bare 500 — indistinguishable from a broker bug, when the whole
+            # point of the 503 is to say "outage, retry" to a friend's SDK.
+            log.exception("broker: datastore unavailable while sizing the apify ceiling")
+            return Response("Broker datastore unavailable.", status_code=503)
+        params = clamps.clamp_apify_charge(params, remaining)
         # Remember what the run was actually capped at: that is the worst case
         # this run can cost, and it is what the friend gets debited on creation.
         apify_ceiling_usd = float(params[clamps.APIFY_CHARGE_PARAM])
@@ -166,19 +236,20 @@ async def _proxy(vendor: str, path: str, request: Request) -> Response:
         return Response(f"Upstream {vendor} error.", status_code=502)
 
     if upstream.status_code < 400:
-        if vendor == "anthropic":
-            meter.record_anthropic(friend["id"], upstream.content)
-        else:
-            # A created run is debited at its clamped ceiling immediately, then
-            # settled by scripts.reconcile_spend — Apify's usage figure is not
-            # trustworthy at the moment the run first reports terminal. Anything
-            # that is not a run creation (or carries no run id) falls through to
-            # the defensive path.
-            debited = apify_ceiling_usd is not None and meter.record_apify_provisional(
-                friend["id"], upstream.content, apify_ceiling_usd
+        try:
+            await run_in_threadpool(
+                _record_spend,
+                vendor,
+                friend["id"],
+                upstream.content,
+                apify_ceiling_usd,
             )
-            if not debited:
-                meter.record_apify(friend["id"], upstream.content)
+        except Exception:
+            # Fail OPEN: the money is already spent upstream, so a bookkeeping
+            # failure must not also cost the friend their result. meter.py has
+            # internal exception handling too; this catches the case where that
+            # mechanism fails or the metering function itself is broken.
+            log.exception("failed to record spend for friend %s", friend["id"])
 
     return Response(
         content=upstream.content,

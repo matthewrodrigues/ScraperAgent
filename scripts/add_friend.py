@@ -12,7 +12,6 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import sqlite3
 import sys
 
 from keybroker import auth, db
@@ -29,7 +28,7 @@ def main(argv: list[str] | None = None) -> int:
     token = auth.generate_token()
     try:
         db.create_friend(args.name, auth.hash_token(token), args.budget)
-    except sqlite3.IntegrityError:
+    except db.DuplicateFriendError:
         print(f"A friend named {args.name!r} already exists.", file=sys.stderr)
         return 1
 

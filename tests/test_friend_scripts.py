@@ -33,6 +33,9 @@ def test_the_raw_token_is_not_stored(broker_db, capsys):
 def test_adding_a_duplicate_name_fails_without_a_traceback(broker_db, capsys):
     add_friend.main(["alice"])
     assert add_friend.main(["alice"]) == 1
+    err = capsys.readouterr().err
+    assert "A friend named 'alice' already exists." in err
+    assert "Traceback" not in err
 
 
 def test_revoke_friend_revokes(broker_db, capsys):

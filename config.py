@@ -241,3 +241,19 @@ BROKER_PORT = int(os.getenv("BROKER_PORT", "8001"))
 BROKER_GLOBAL_MONTHLY_BUDGET_USD = float(
     os.getenv("BROKER_GLOBAL_MONTHLY_BUDGET_USD", "25.00")
 )
+
+# ---- Broker storage ----
+# Set to a Supabase (or any Postgres) connection string to persist the broker's
+# friends/spend tables there instead of the local SQLite file. Unset means
+# SQLite at BROKER_DB_PATH — that is the signal, so there is no separate mode
+# flag that could disagree with it.
+#
+# Contains a password: keep it in .env and your deploy platform's secret store,
+# never in .env.example.
+SUPABASE_DB_URL = os.getenv("SUPABASE_DB_URL", "")
+
+# A SEPARATE database for the Postgres contract tests. Deliberately not
+# SUPABASE_DB_URL: those tests create friends, write spend rows, and truncate
+# between cases, so reusing the production setting would mean configuring the
+# broker for real use silently arms the suite to write to the live ledger.
+SUPABASE_TEST_DB_URL = os.getenv("SUPABASE_TEST_DB_URL", "")
